@@ -1,0 +1,208 @@
+# pn-docgen configuration file
+# Place this file in the directory where you run pn-docgen commands.
+#
+# This file contains ALL project-specific values.  The tool itself is
+# project-agnostic — remove or empty the sections below to use it on
+# a different AWS project.
+
+# ─── Project Identity ────────────────────────────────────────────────────────
+# These values replace every hardcoded project-specific identifier
+# reference that was previously scattered across the codebase.
+project:
+  prefix: "pn-"
+  aws_profile_regex: 'sso_pn-([a-z]+)-([a-z]+)(?:-readonly)?'
+  java_group_id: "pagopa.pn"
+  description: "SEND"
+
+# ─── Discovery Settings ─────────────────────────────────────────────────────
+# Controls how resources are assigned to components and how ECS
+# environment-variable scanning discovers HTTP client edges.
+discovery:
+  sources:
+    - tag       # primary: Microservice=<name> tag
+    - cfn       # fallback: CFN stack membership
+  tag_key: Microservice   # tag key applied by pn-cicd deployEcsService.sh
+
+  cfn_paths:
+    microservice: "scripts/aws/cfn/microservice.yml"
+    storage: "scripts/aws/cfn/storage.yml"
+
+  cfn_analyzer:
+    # generic -> use one analyzer over template_files only (default)
+    # legacy  -> use split analyzers over cfn_paths (SEND-style preset)
+    # hybrid  -> run both legacy and generic analyzers
+    mode: generic
+    # Generic mode input templates (relative to repo root).
+    # Leave empty to fallback to cfn_paths values.
+    template_files: []
+
+  ecs_dependencies:
+    # Regex (one capture group) applied to container env-var names to
+    # extract a service fragment.  The fragment is then looked up in
+    # service_alias_map (or falls back to "{prefix}{fragment}").
+    env_regex: 'PN_[A-Z]+_([A-Z_]+?)(?:BASE_URL|BASEURL)$'
+
+    # Internal ALB / DNS patterns that indicate an intra-platform call.
+    # Used by cfn_micro.py to build BASEURL matching regexes.
+    internal_domains:
+      - '${ApplicationLoadBalancerDomain}'
+      - 'alb.confidential.pn.internal'
+
+    # Canonical mapping: env-var fragment → service name.
+    # Fragments are lowercase, hyphens stripped.  When the fragment is
+    # NOT in this map, the fallback is "{prefix}{fragment}".
+    service_alias_map:
+      delivery: "pn-delivery"
+      deliverypush: "pn-delivery-push"
+      delivery-push: "pn-delivery-push"
+      mandate: "pn-mandate"
+      userattributes: "pn-user-attributes"
+      user-attributes: "pn-user-attributes"
+      externalregistries: "pn-external-registries"
+      external-registries: "pn-external-registries"
+      downtimelogs: "pn-downtime-logs"
+      downtime-logs: "pn-downtime-logs"
+      safestorage: "pn-safe-storage"
+      safe-storage: "pn-safe-storage"
+      datavault: "pn-data-vault"
+      data-vault: "pn-data-vault"
+      f24: "pn-f24"
+      nationalregistries: "pn-national-registries"
+      national-registries: "pn-national-registries"
+      emd: "pn-emd"
+      apikeymanager: "pn-apikey-manager"
+      apikey-manager: "pn-apikey-manager"
+      bff: "pn-bff"
+      progression-sensor: "pn-progression-sensor"
+      progressionsensor: "pn-progression-sensor"
+
+# ─── Render Settings ─────────────────────────────────────────────────────────
+# Controls diagram rendering behaviour.
+render:
+  # Override the L2 service-map title.  Blank → uses "{description} Service Map".
+  title: ""
+  # Strip project.prefix from node labels for cleaner diagrams.
+  label_strip_prefix: true
+
+# ─── Diagrams ─────────────────────────────────────────────────────────────────
+# Each diagram entry defines what to include/exclude and how to render it.
+diagrams:
+
+  - name: "pn-delivery"
+    description: "L3 diagram for pn-delivery microservice"
+    template: l3_microservice
+    selectors:
+      - type: tag
+        name: Microservice
+        value: pn-delivery
+      - type: cfn_stack           # also include resources from CFN stack
+        name: pn-delivery         # stack name prefix
+    exclusions:
+      - type: tag
+        name: diag_exclude
+        value: "true"
+    output:
+      json: true      # component_analysis.json + component_graph.json
+      d2: true        # pn-delivery.d2
+      png: true       # pn-delivery.png (requires d2 CLI)
+
+  - name: "pn-bff"
+    description: "L3 diagram for pn-bff microservice"
+    template: l3_microservice
+    selectors:
+      - type: tag
+        name: Microservice
+        value: pn-bff
+    exclusions:
+      - type: tag
+        name: diag_exclude
+        value: "true"
+    output:
+      json: true
+      d2: true
+      png: true
+
+  # Example: multi-component diagram (e.g. notification flow)
+  # - name: "notification-flow"
+  #   description: "End-to-end notification flow across microservices"
+  #   template: l2_container
+  #   selectors:
+  #     - type: tag
+  #       name: Microservice
+  #       value: pn-delivery
+  #     - type: tag
+  #       name: Microservice
+  #       value: pn-delivery-push
+  #     - type: tag
+  #       name: Microservice
+  #       value: pn-mandate
+  #   exclusions:
+  #     - type: tag
+  #       name: diag_exclude
+  #       value: "true"
+  #   output:
+  #     json: true
+  #     d2: true
+  #     png: true
+
+# ─── Diagram Pattern ──────────────────────────────────────────────────────────
+# Controls the L3 diagram layout template for this project.
+#
+# Options:
+#   auto              → detect automatically (default): ECS present → ecs_microservice,
+#                       otherwise → lambda_microservice
+#   ecs_microservice  → ECS service as central compute node, Lambda functions as
+#                       a horizontal workers strip below
+#   lambda_microservice → Lambda functions as primary compute grid (no ECS hero)
+#
+# Can be overridden per-run with: pn-docgen generate --pattern ecs_microservice
+pattern: auto
+
+# ─── Edge Type Filtering ──────────────────────────────────────────────────────
+# Controls which edge types are rendered in L3 diagrams.
+#
+# Logic:
+#   include: [...]  → render ONLY the listed types (whitelist mode)
+#   exclude: [...]  → render everything EXCEPT the listed types (blacklist mode)
+#   both empty      → render ALL edge types (default)
+#
+# Valid edge type names:
+#   sqs_trigger        — SQS queue → Lambda (EventSourceMapping)
+#   sqs_consumer       — SQS queue → ECS (IAM ReceiveMessage)
+#   sqs_producer       — ECS → SQS (IAM SendMessage)
+#   http_call          — ECS → external service (BASEURL env var)
+#   storage_access     — Lambda/ECS → DynamoDB/S3 (IAM execution role)
+#   apigw_integration  — API Gateway → Lambda or ECS
+#   eventbridge_trigger— EventBridge Rule → ECS / Lambda / SQS
+#   dynamodb_stream    — DynamoDB Stream → Lambda (EventSourceMapping)
+#   sns_subscription   — SNS Topic → SQS queue / Lambda
+#
+edge_types:
+  include: []   # empty = no whitelist (show all unless excluded)
+  exclude: []   # empty = hide nothing
+  # Example: show only data-flow edges, hide cross-service HTTP noise
+  # exclude:
+  #   - http_call
+
+# ─── Resource Kind Overrides ──────────────────────────────────────────────────
+# Override the built-in resource classification (DEFAULT_RESOURCE_REGISTRY).
+# Keys are normalized resource_type values (same as InventoryNode.resource_type).
+#
+# Kinds:
+#   node  → rendered as a box/icon in the diagram
+#   edge  → rendered as a directed arrow between two nodes
+#   skip  → excluded from the diagram entirely
+#
+# Lookup order: this section > DEFAULT_RESOURCE_REGISTRY > fallback (node)
+resource_kinds:
+  skip:
+    # WAF and Target Groups are implementation details at L3 level.
+    # Remove these lines to show them in the diagram.
+    - aws_wafv2_webacl
+    - target_group
+
+  # edge:
+  #   - my_custom_event_mapping   # promote a custom type to EDGE
+
+  # node:
+  #   - aws_lambda_layerversion   # promote from SKIP to NODE
