@@ -28,7 +28,8 @@ def group_ingress(text):
     # Move scopes and rewrite endpoints, never add a semantic connection.
     for name in blocks:
         text = re.sub(rf'(?m)^{re.escape(name)}(?=\.| ->)', "ingress." + name, text)
-        text = re.sub(rf'(?<= -> ){re.escape(name)}(?=\.|[ :{{\n])', "ingress." + name, text)
+        text = re.sub(rf'(?m)^(\s*[\w.]+ -> ){re.escape(name)}(?=\.|[ :{{\n])',
+                      lambda match: match[1] + "ingress." + name, text)
     lines = text.splitlines()
     lines[0] = CONTRACT_PREFIX + json.dumps(contracts, sort_keys=True, separators=(",", ":"))
     wrapper = '\ningress: "" {\n  class: boundary\n  style.stroke-width: 0\n  style.fill: transparent\n'

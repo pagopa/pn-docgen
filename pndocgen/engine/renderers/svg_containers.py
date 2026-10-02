@@ -47,6 +47,9 @@ def text_conflicts(diagram):
               for i,text in enumerate(node.texts)]
     issues = set()
     for i,(identity,owner,box) in enumerate(labels):
+        for edge in diagram.edges:
+            if edge.label is not None and overlaps(box, boxes[edge.label]):
+                issues.add(('text-edge-label', identity, edge.edge_id))
         for key,node in diagram.nodes.items():
             if overlaps(box,node.box):
                 issues.add(('text-node',identity,key))
@@ -64,6 +67,22 @@ def text_conflicts(diagram):
                     issues.add(('text-path',identity,edge.edge_id,index))
                 last=command.anchor
     return issues
+
+
+def measured_text_gate(before, after):
+    """Reject new measured text defects; existing defects are not silently fixed."""
+    old_audit, _ = text_audit(before)
+    new_audit, _ = text_audit(after)
+    if old_audit['unmeasured'] or new_audit['unmeasured']:
+        return 'unmeasured text prevents safe layout edits'
+    if set(new_audit['overflow']) - set(old_audit['overflow']):
+        return 'new text overflow'
+    try:
+        if text_conflicts(after) - text_conflicts(before):
+            return 'new text collision'
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 
 def _related(a, b):
@@ -147,9 +166,9 @@ def fit_containers(source: Path, destination: Path, contracts, *, margin=16.0, m
             except ValueError as exc:
                 report['skipped'].append({'cluster': key, 'reason': str(exc)})
                 continue
-            if max(n.center[0] for n in nodes)-min(n.center[0] for n in nodes) > EPS:
-                report['skipped'].append({'cluster': key, 'reason': 'column not aligned'})
-                continue
+            # Alignment may conservatively abstain. Fit the actual content
+            # envelope even for a ragged column, without moving its children.
+            # The same growth, route and neighbor guards still apply below.
             snapshot = _serialize(diagram)
             candidate = _reload(snapshot, source)
             _, proposed_boxes = text_audit(candidate)

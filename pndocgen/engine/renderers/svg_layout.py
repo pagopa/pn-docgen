@@ -50,6 +50,15 @@ def normalize_layout(source: Path, destination: Path, contracts,
             rules = {name: Rule(**values, max_shift=settings.max_shift,
                                min_gap=settings.min_gap, min_terminal=settings.min_terminal)
                      for name, values in sorted(contracts.items())}
+            # Establish safe text bounds before moving nodes. Otherwise a
+            # recoverable initial overflow can block alignment, while fitting
+            # only afterwards is too late for the measured-text gate.
+            if settings.fit_text_containers:
+                target = staging / "initial-containers.svg"
+                report["initial_text_containers"] = fit_containers(
+                    current, target, contracts, margin=settings.text_container_margin,
+                    max_growth=settings.max_container_growth)
+                current = target
             if settings.prefer_free_nodes:
                 target = staging / "free.svg"
                 report["free_nodes"] = prefer_free_nodes(current, target, rules)

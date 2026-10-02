@@ -56,11 +56,13 @@ def _grid_columns(nodes, count):
 
 def targets(diagram: Diagram, cluster: str, rule: Rule):
     """Compute a complete target before any movement. Same algorithm for all shapes."""
+    edge_ids = {edge.edge_id for edge in diagram.edges}
     for group in diagram.tree.getroot().iter(NS + "g"):
         identifier = decode_id(group.get("class", ""))
         if (identifier and not identifier.startswith("(") and "." in identifier
                 and identifier.rsplit(".", 1)[0] == cluster
-                and identifier not in diagram.nodes and identifier not in diagram.containers):
+                and identifier not in diagram.nodes and identifier not in diagram.containers
+                and identifier not in edge_ids):
             raise ValueError(f"unsupported child geometry: {identifier}")
     nodes = diagram.children_of(cluster)
     planned = {n.node_id: n.center for n in nodes}
@@ -201,6 +203,8 @@ def normalize(source: Path, destination: Path, rules: dict[str, Rule]):
             failure = failure or _valid(diagram, _attachments(before), non_orthogonal_segments(before),
                                         collisions(before), _label_distances(before))
             failure = failure or _straight_direction_checks(before, diagram, rule.min_terminal)
+            from pndocgen.engine.renderers.svg_containers import measured_text_gate
+            failure = failure or measured_text_gate(before, diagram)
             if not failure and _stable_signature(before) != _stable_signature(diagram):
                 failure = "canvas, containers, sizes, or graph topology changed"
             if not failure:

@@ -2,6 +2,7 @@
 
 import hashlib
 import runpy
+import pytest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -28,11 +29,12 @@ def test_portable_icons_include_notice_without_changing_icon_bytes(tmp_path: Pat
     assert portable_icons(content, output, [icon]) == converted
 
 
-def test_svg_notice_is_conditional_and_idempotent(tmp_path: Path) -> None:
+@pytest.mark.parametrize('icon_class', ['aws_node', 'ecs_hero', 'service_box'])
+def test_svg_notice_is_conditional_and_idempotent(tmp_path: Path, icon_class) -> None:
     svg = tmp_path / "diagram.svg"
     svg.write_text(
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 60 60">'
-        '<g class="aws_node"><image x="0" y="0" width="60" height="60"/></g>'
+        f'<g class="{icon_class}"><image x="0" y="0" width="60" height="60"/></g>'
         '</svg>'
     )
     assert annotate_svg_icons(svg)

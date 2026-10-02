@@ -95,6 +95,38 @@ def test_unknown_font_is_explicit_not_zero_width(tmp_path, font_css):
     assert result['after']['unmeasured'] and not result['applied']
 
 
+def test_container_fits_ragged_column_after_alignment_abstention(tmp_path, font_css):
+    source, contracts = synthetic(tmp_path, font_css)
+    tree = ET.parse(source)
+    diagram = Diagram.from_tree(tree, source)
+    diagram.nodes['rules.n1'].translate(18, 0)
+    tree.write(source)
+    before = Diagram.load(source)
+    out = tmp_path/'ragged-fit.svg'
+    result = fit_containers(source, out, contracts)
+    assert result['applied'] and not result['after']['overflow']
+    after = Diagram.load(out)
+    assert {k: ET.tostring(n.group) for k,n in before.nodes.items()} == {
+        k: ET.tostring(n.group) for k,n in after.nodes.items()}
+
+
+def test_pipeline_fits_text_before_safe_alignment(tmp_path, font_css):
+    from pndocgen.engine.renderers.svg_layout import normalize_layout
+    source, contracts = synthetic(tmp_path, font_css)
+    tree = ET.parse(source)
+    diagram = Diagram.from_tree(tree, source)
+    diagram.nodes['rules.n1'].translate(18, 0)
+    tree.write(source)
+    out = tmp_path/'normalized.svg'
+    normalize_layout(source, out, contracts, NormalizationConfig())
+    after = Diagram.load(out)
+    assert not text_audit(after)[0]['overflow']
+    assert len({n.center[0] for n in after.nodes.values()}) == 1
+    repeat = tmp_path/'normalized-repeat.svg'
+    normalize_layout(out, repeat, contracts, NormalizationConfig())
+    assert out.read_bytes() == repeat.read_bytes()
+
+
 def test_shaping_and_tspan_are_not_guessed(tmp_path, font_css):
     source, _ = synthetic(tmp_path, font_css)
     diagram = Diagram.load(source)
@@ -151,6 +183,96 @@ def test_capacity_preserves_far_endpoints_and_square_icon(tmp_path,font_css):
     second = tmp_path/'second.svg'
     fit_ports(out,second,contracts={'rules':{'layout':'column'}})
     assert second.read_bytes() == out.read_bytes()
+
+
+def test_centered_overfull_bundle_is_resized(tmp_path, font_css):
+    from pndocgen.engine.renderers.svg_capacity import fit_ports
+    source = capacity_source(tmp_path, font_css)
+    tree = ET.parse(source)
+    diagram = Diagram.from_tree(tree, source)
+    diagram.nodes['rules.n0'].translate(0, 8)
+    tree.write(source)
+    out = tmp_path/'centered.svg'
+    result = fit_ports(source, out, contracts={'rules': {'layout': 'column'}})
+    assert result['applied'], result
+    assert result['applied'][0]['shift'] == 0
+    assert Diagram.load(out).nodes['rules.n0'].box[2:] == (78, 78)
+    repeat = tmp_path/'centered-repeat.svg'
+    assert not fit_ports(out, repeat, contracts={'rules': {'layout': 'column'}})['applied']
+    assert out.read_bytes() == repeat.read_bytes()
+
+
+def test_measured_node_label_overlaps_edge_label_without_route_collision(tmp_path, font_css):
+    from pndocgen.engine.renderers.svg_containers import text_conflicts, measured_text_gate
+    source, _ = synthetic(tmp_path, font_css)
+    before = Diagram.load(source)
+    tree = ET.parse(source)
+    diagram = Diagram.from_tree(tree, source)
+    group = ET.SubElement(tree.getroot(), NS+'g', {
+        'class': base64.b64encode(b'(rules.n0 -> rules.n1)[0]').decode()})
+    ET.SubElement(group, NS+'path', d='M 300 100 L 400 100')
+    text = diagram.nodes['rules.n0'].texts[0]
+    ET.SubElement(group, NS+'text', dict(text.attrib)).text = 'Short'
+    after = Diagram.from_tree(tree, source)
+    assert any(issue[0] == 'text-edge-label' for issue in text_conflicts(after))
+    assert measured_text_gate(before, after) == 'new text collision'
+
+
+def test_alignment_and_preferences_reject_unmeasured_text(tmp_path):
+    from test_explicit_alignment import fixture
+    from pndocgen.engine.renderers.svg_alignment import normalize, Rule
+    from pndocgen.engine.renderers.svg_preferences import _gate
+    source = fixture(tmp_path, [('group.a', 100, 100, 'rect'), ('group.b', 118, 230, 'rect')])
+    tree = ET.parse(source)
+    diagram = Diagram.from_tree(tree, source)
+    ET.SubElement(diagram.nodes['group.a'].group, NS+'text', x='100', y='130').text = 'Unknown'
+    tree.write(source)
+    before = Diagram.load(source)
+    assert 'unmeasured' in _gate(before, before)
+    out = tmp_path/'unsafe.svg'
+    result = normalize(source, out, {'group': Rule('column')})
+    assert not result['applied']
+    assert 'unmeasured' in result['skipped'][0]['reason']
+    assert out.read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize('layout', ['row', 'grid'])
+def test_alignment_rolls_back_new_measured_label_overlap(tmp_path, font_css, layout):
+    from test_explicit_alignment import fixture
+    from pndocgen.engine.renderers.svg_alignment import normalize, Rule
+    from pndocgen.engine.renderers.svg_containers import text_conflicts
+    source = fixture(tmp_path, [('group.a', 100, 100, 'rect'), ('group.b', 170, 200, 'rect')])
+    tree = ET.parse(source)
+    ET.SubElement(tree.getroot(), NS+'style').text = font_css
+    diagram = Diagram.from_tree(tree, source)
+    for node in diagram.nodes.values():
+        ET.SubElement(node.group, NS+'text', x=str(node.center[0]), y=str(node.center[1]+30),
+                      attrib={'class': 'text-bold', 'style': 'text-anchor:middle;font-size:10px'}).text = 'LongLabelABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    tree.write(source)
+    assert not text_conflicts(Diagram.load(source))
+    out = tmp_path/'guarded.svg'
+    report = normalize(source, out, {'group': Rule(layout, columns=2)})
+    assert not report['applied'], report
+    assert 'text collision' in report['skipped'][0]['reason']
+    assert out.read_bytes() == source.read_bytes()
+
+
+def test_preference_gate_rejects_label_crossing_unrelated_route(tmp_path, font_css):
+    from test_explicit_alignment import fixture
+    from pndocgen.engine.renderers.svg_preferences import _gate
+    from pndocgen.engine.renderers.svg_normalizer import _reload, _serialize
+    source = fixture(tmp_path, [('group.a', 100, 100, 'rect')],
+                     [('else.a', 'else.b', 'M 50 160 L 150 160')])
+    tree = ET.parse(source)
+    ET.SubElement(tree.getroot(), NS+'style').text = font_css
+    node = Diagram.from_tree(tree, source).nodes['group.a']
+    ET.SubElement(node.group, NS+'text', x='100', y='130',
+                  attrib={'class': 'text-bold', 'style': 'text-anchor:middle;font-size:10px'}).text = 'Short'
+    tree.write(source)
+    before = Diagram.load(source)
+    after = _reload(_serialize(before), source)
+    after.nodes['group.a'].translate(0, 30)
+    assert _gate(before, after) == 'new text collision'
 
 
 @pytest.mark.parametrize('option',[{'max_growth':0},{'max_shift':0},{'allowed_classes':()}])

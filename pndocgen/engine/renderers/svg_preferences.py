@@ -15,6 +15,8 @@ def _gate(before, after, min_terminal=10.0):
     failure = _valid(after, _attachments(before), non_orthogonal_segments(before),
                      collisions(before), _label_distances(before))
     failure = failure or base._straight_direction_checks(before, after, min_terminal)
+    from pndocgen.engine.renderers.svg_containers import measured_text_gate
+    failure = failure or measured_text_gate(before, after)
     if not failure and base._stable_signature(before) != base._stable_signature(after):
         failure = "changed canvas, containers, node sizes, or topology"
     old = base._port_offsets(before)

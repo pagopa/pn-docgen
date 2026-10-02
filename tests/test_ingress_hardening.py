@@ -7,10 +7,38 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_explicit_alignment import fixture
+from test_text_containers import font_css
 from pndocgen.engine.renderers.svg_geometry import Diagram, NS, edge_endpoints, collisions
 from pndocgen.engine.renderers.svg_alignment import Rule
 from pndocgen.engine.renderers.svg_preferences import center_by_alternatives
 from pndocgen.engine.renderers.svg_labels import separate_labels
+
+
+def test_ingress_rewrites_endpoints_not_quoted_labels():
+    import json
+    from pndocgen.engine.renderers.ingress_layout import group_ingress
+    from pndocgen.engine.renderers.svg_layout import CONTRACT_PREFIX
+    source = CONTRACT_PREFIX + json.dumps({'clusters': {'apigw': {}, 'queues': {}}}) + '\n'
+    source += 'apigw: "API" {\n}\nqueues: "Queues" {\n}\n'
+    source += 'apigw.api -> queues.worker: "routes -> queues.worker"\n'
+    result = group_ingress(source)
+    assert 'ingress.apigw.api -> ingress.queues.worker: "routes -> queues.worker"' in result
+    assert group_ingress(result) == result
+
+
+def test_scoped_leaf_edge_is_not_unsupported_geometry(tmp_path):
+    from pndocgen.engine.renderers.svg_alignment import targets
+    source = fixture(tmp_path, [('lambdas.a', 100, 100, 'rect'),
+                               ('lambdas.b', 118, 230, 'rect')])
+    tree = ET.parse(source)
+    group = ET.SubElement(tree.getroot(), NS+'g', {
+        'class': base64.b64encode(b'lambdas.(a -> b)[0]').decode()})
+    ET.SubElement(group, NS+'path', d='M 100 110 L 100 180 L 118 180 L 118 220')
+    tree.write(source)
+    diagram = Diagram.load(source)
+    assert len(diagram.edges) == 1
+    assert targets(diagram, 'lambdas', Rule('column')) == {
+        'lambdas.a': (109, 100), 'lambdas.b': (109, 230)}
 
 
 @pytest.mark.parametrize("identifier,expected", [
@@ -82,8 +110,14 @@ def label_fixture(tmp_path):
     return source
 
 
-def test_label_separation_preserves_paths_and_is_idempotent(tmp_path):
+def test_label_separation_preserves_paths_and_is_idempotent(tmp_path, font_css):
     source = label_fixture(tmp_path)
+    tree = ET.parse(source)
+    ET.SubElement(tree.getroot(), NS+'style').text = font_css
+    for text in tree.getroot().iter(NS+'text'):
+        text.set('class', 'text-bold')
+        text.set('style', 'text-anchor:middle;font-size:10px')
+    tree.write(source)
     before = Diagram.load(source)
     assert collisions(before)
     output = tmp_path / "out.svg"

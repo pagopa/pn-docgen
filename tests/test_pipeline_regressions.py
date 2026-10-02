@@ -68,7 +68,13 @@ def _local_discovery(args):
     }))
 
 
-def test_multi_component_run_does_not_overwrite_outputs(tmp_path):
+def test_multi_component_run_does_not_overwrite_outputs(tmp_path, monkeypatch):
+    from datetime import datetime
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 1, 12, 0, tzinfo=tz)
+    monkeypatch.setattr("datetime.datetime", FixedDatetime)
     args = _args(tmp_path)
     pipeline.run(args, discover_func=_local_discovery, resolve_func=pipeline.resolve, generate_func=pipeline.generate)
     diagrams = sorted((tmp_path / "all").glob("*.d2"))

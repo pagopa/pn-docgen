@@ -48,7 +48,7 @@ def annotate_svg_icons(svg_path: Path) -> bool:
     tree = ET.parse(svg_path)
     root = tree.getroot()
     ns = "{http://www.w3.org/2000/svg}"
-    if not any({"aws_node", "ecs_hero"}.intersection(group.get("class", "").split())
+    if not any({"aws_node", "ecs_hero", "service_box"}.intersection(group.get("class", "").split())
                and next(group.iter(f"{ns}image"), None) is not None
                for group in root.iter(f"{ns}g")):
         return False

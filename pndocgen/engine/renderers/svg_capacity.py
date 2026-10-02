@@ -25,7 +25,7 @@ def fit_ports(source, destination, *, allowed_classes=('ecs_hero',), max_growth=
         with destination.open('xb') as stream:
             stream.write(source.read_bytes())
         return report
-    for node_id in sorted({s.node_id for s in find_port_spans(before) if abs(s.offset)>EPS}):
+    for node_id in sorted({s.node_id for s in find_port_spans(before)}):
         old_node = before.nodes[node_id]
         if old_node.image is None or not set(old_node.classes).intersection(allowed_classes):
             continue
@@ -50,6 +50,8 @@ def fit_ports(source, destination, *, allowed_classes=('ecs_hero',), max_growth=
         center = old_node.center[index]+delta
         points = [(e.start if at_source else e.end)[index] for e,at_source in incident]
         size = max(old_node.box[2],old_node.box[3], math.ceil(2*max(abs(v-center) for v in points)+2*padding))
+        if size <= max(old_node.box[2:]) + EPS and abs(delta) <= EPS:
+            continue
         if size-max(old_node.box[2:])>max_growth or abs(delta)>max_shift:
             report['skipped'].append((node_id, 'capacity exceeds bounded growth/shift'))
             continue
