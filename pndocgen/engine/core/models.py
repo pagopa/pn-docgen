@@ -138,6 +138,11 @@ DEFAULT_RESOURCE_REGISTRY: dict[str, ResourceMeta] = {
     "kinesis":                          _node(SemanticRole.MESSAGING, "aws-kinesis"),
     "eventbridge_rule":                 _node(SemanticRole.MESSAGING, "aws-eventbridge"),
     "eventbridge_bus":                  _node(SemanticRole.MESSAGING, "aws-eventbridge"),
+    # A schedule is a trigger node even when no target binding is available.
+    "aws_scheduler_schedule":           _node(SemanticRole.MESSAGING, "aws-eventbridge"),
+    # API authorization is meaningful; keep it until a verified binding can
+    # replace the configuration node with an explicit authorization relation.
+    "aws_apigateway_authorizer":        _node(SemanticRole.SECURITY, "aws-api-gateway"),
     # --- Ingress / Network
     "apigw":                            _node(SemanticRole.INGRESS,   "aws-api-gateway"),
     "apigw_v2":                         _node(SemanticRole.INGRESS,   "aws-api-gateway"),
@@ -153,8 +158,24 @@ DEFAULT_RESOURCE_REGISTRY: dict[str, ResourceMeta] = {
     # --- Implementation details → excluded from diagrams
     "aws_lambda_layerversion":          _skip(),
     "aws_cloudformation_stack":         _skip(),
+    "aws_apigateway_model":             _skip(),
+    "aws_apigateway_requestvalidator":  _skip(),
+    "aws_apigateway_method":            _skip(),
+    "aws_apigateway_resource":          _skip(),
+    "aws_apigateway_deployment":        _skip(),
+    "aws_apigateway_stage":             _skip(),
+    "aws_s3_bucketpolicy":              _skip(),
+    "aws_sqs_queuepolicy":              _skip(),
 }
 
+
+from pndocgen.engine.core.resource_policy import CFN_SUPPORT_TYPES
+
+# The same support-type policy applies to saved inventories and live discovery.
+for _cfn_type in CFN_SUPPORT_TYPES:
+    DEFAULT_RESOURCE_REGISTRY.setdefault(_cfn_type.lower().replace("::", "_"), _skip())
+DEFAULT_RESOURCE_REGISTRY.setdefault("cloudwatch_alarm", _skip())
+DEFAULT_RESOURCE_REGISTRY.setdefault("log_group", _skip())
 
 # Fallback for any resource_type not in the registry.
 # Defaults to NODE/UNKNOWN so nothing is silently dropped.
@@ -229,14 +250,18 @@ class Edge:
     target: str          # resource name or component name
     edge_type: str       # "sqs_produce" | "sqs_consume" | "http_call"
     label: str = ""      # optional label for the diagram arrow
+    evidence: str = ""   # source of inference; empty for historical inventories
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "source": self.source,
             "target": self.target,
             "type": self.edge_type,
             "label": self.label,
         }
+        if self.evidence:
+            result["evidence"] = self.evidence
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +319,29 @@ class ComponentCluster:
     nodes: list = field(default_factory=list)  # list[InventoryNode]
 
 
+# Sequenza semantica delle colonne del diagramma: ingresso → code → calcolo → storage.
+CLUSTER_ORDER: tuple[str, ...] = (
+    "apigw", "rules", "sns", "streams", "inputs", "messaging", "queues",
+    "ecs", "compute", "lambdas", "workers",
+    "dynamodb", "storage", "output_queues", "external", "security", "misc",
+)
+
+_CLUSTER_RANK: dict[str, int] = {name: rank for rank, name in enumerate(CLUSTER_ORDER)}
+
+
+def _text_key(value) -> bytes:
+    """Confronto byte-wise, indipendente dal locale."""
+    return str(value or "").encode("utf-8")
+
+
+def _cluster_key(name: str) -> tuple[int, bytes]:
+    return (_CLUSTER_RANK.get(name, len(CLUSTER_ORDER)), _text_key(name))
+
+
+def _node_key(node) -> tuple[bytes, bytes, bytes]:
+    return (_text_key(node.name), _text_key(node.resource_type), _text_key(node.id))
+
+
 @dataclass
 class Component:
     """
@@ -312,6 +360,15 @@ class Component:
 
     def get_cluster(self, name: str) -> ComponentCluster:
         return self.clusters.get(name, ComponentCluster(name=name))
+
+    def canonicalize(self) -> None:
+        """Ordina i cluster nella sequenza dichiarata e i nodi per nome."""
+        for cluster in self.clusters.values():
+            cluster.nodes.sort(key=_node_key)
+        self.clusters = {
+            name: self.clusters[name]
+            for name in sorted(self.clusters, key=_cluster_key)
+        }
 
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict (for component_graph.json)."""
@@ -346,6 +403,48 @@ class ComponentGraph:
 
     def add_edge(self, edge: Edge):
         self.edges.append(edge)
+
+    def canonicalize(self) -> None:
+        """Impone un ordine totale su componenti, cluster, nodi e archi.
+
+        Senza questo passaggio due discovery identiche producono diagrammi diversi,
+        perché l'ordine eredita quello delle risposte delle API AWS.
+        """
+        for component in self.components.values():
+            component.canonicalize()
+        self.components = {
+            name: self.components[name]
+            for name in sorted(self.components, key=_text_key)
+        }
+
+        cluster_of: dict[str, str] = {
+            node.name: cluster_name
+            for component in self.components.values()
+            for cluster_name, cluster in component.clusters.items()
+            for node in cluster.nodes
+        }
+
+        def identity(edge: Edge) -> tuple:
+            return (
+                _text_key(edge.source),
+                _text_key(edge.target),
+                _text_key(edge.edge_type),
+                _text_key(edge.label),
+                _text_key(edge.evidence),
+            )
+
+        def edge_key(edge: Edge) -> tuple:
+            return (
+                _cluster_key(cluster_of.get(edge.source, "")),
+                _cluster_key(cluster_of.get(edge.target, "")),
+                *identity(edge),
+            )
+
+        unique: dict[tuple, Edge] = {}
+        for edge in self.edges:
+            unique.setdefault(identity(edge), edge)
+        self.edges = sorted(unique.values(), key=edge_key)
+        self.orphans.sort(key=_node_key)
 
     def to_dict(self) -> dict:
         return {

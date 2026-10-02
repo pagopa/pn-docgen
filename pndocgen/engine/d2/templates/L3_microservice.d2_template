@@ -17,15 +17,6 @@ vars: {
   d2-config: {
     layout-engine: elk
   }
-  elk: {
-    "direction": "RIGHT"
-    "edgeRouting": "ORTHOGONAL"
-    "portAlignment.default": "CENTER"
-    "org.eclipse.elk.hierarchyHandling": "INCLUDE_CHILDREN"
-    "org.eclipse.elk.layered.edgeRouting": "ORTHOGONAL"
-    "org.eclipse.elk.layered.spacing.nodeNodeBetweenLayers": "180"
-    "org.eclipse.elk.spacing.nodeNode": "100"
-  }
 }
 
 classes: {
@@ -50,24 +41,18 @@ classes: {
 {% if nodes %}
 {{ cluster_name }}: "{{ cluster_name | title }}" {
   class: boundary
-{% if cluster_name == "inputs" %}
-  style.fill: "#E3F2FD"
-{% elif cluster_name == "compute" %}
-  style.fill: "#E8F5E9"
-{% elif cluster_name == "messaging" %}
-  style.fill: "#FFF3E0"
-{% elif cluster_name == "storage" %}
-  style.fill: "#FCE4EC"
-{% elif cluster_name == "security" %}
-  style.fill: "#F3E5F5"
-{% else %}
-  style.fill: "#F5F5F5"
+  direction: down
+{% if cluster_name in generic_grids %}
+  grid-columns: {{ generic_grids[cluster_name] }}
 {% endif %}
+  style.fill: "{{ cluster_fills.get(cluster_name, cluster_fills['default']) }}"
 {% for node in nodes %}
   {{ node.id }}: "{{ node.label }}" {
     class: aws_node
 {% if node.icon %}
     icon: {{ node.icon }}
+{% else %}
+    shape: rectangle
 {% endif %}
     width: {{ node.width }}
     height: {{ node.height }}
@@ -98,6 +83,20 @@ classes: {
   style.stroke: "#4A90D9"
   style.stroke-width: 2
   style.font-size: 10
+}
+{% endfor %}
+{% endif %}
+
+{% if box_edges %}
+# Simplified: one directed edge per cluster pair, actual labels preserved.
+{% for e in box_edges %}
+{{ e.from_box }} -> {{ e.to_box }}: "{{ e.label }}" {
+  style.stroke: "{{ e.stroke_color }}"
+  style.stroke-width: 2
+  style.font-size: 10
+{% if e.stroke_dash %}
+  style.stroke-dash: 3
+{% endif %}
 }
 {% endfor %}
 {% endif %}

@@ -40,6 +40,9 @@ pattern: auto
 from __future__ import annotations
 
 import logging
+from pndocgen.engine.core.normalization_config import NormalizationConfig
+from pndocgen.engine.core.ingress_config import IngressConfig
+from pndocgen.engine.core.view_config import ViewConfig
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -52,6 +55,8 @@ from pndocgen.engine.core.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+VALID_RENDER_THEMES = frozenset({"white", "pastel"})
 
 # ──────────────────────────────────────────────────────────────────────
 # Sentinel ResourceMeta objects used when the YAML only specifies a
@@ -194,6 +199,13 @@ class RenderConfig:
     label_strip_prefix: bool = True
     """Whether to strip ``project.prefix`` from node labels."""
 
+    theme: str = "white"
+    """Diagram colour theme: ``white`` (default) or ``pastel``."""
+
+    normalization: NormalizationConfig = field(default_factory=NormalizationConfig)
+    ingress: IngressConfig = field(default_factory=IngressConfig)
+    view: ViewConfig = field(default_factory=ViewConfig)
+
 
 # ──────────────────────────────────────────────────────────────────────
 # AppConfig — single top-level object aggregating everything
@@ -242,6 +254,8 @@ class AppConfig:
             logger.debug("PyYAML not installed — using all defaults")
             return cls()
 
+        if config_path is not None and not Path(config_path).is_file():
+            raise FileNotFoundError(f"Explicit configuration file not found: {config_path}")
         path = config_path or _find_config()
         if not path or not path.exists():
             logger.debug("No pndocgen.yaml found — using all defaults")
@@ -302,11 +316,22 @@ class AppConfig:
 
         # ── render ───────────────────────────────────────────────────
         render_raw = data.get("render") or {}
+        raw_theme = str(render_raw.get("theme", "white")).strip().lower()
+        if raw_theme not in VALID_RENDER_THEMES:
+            logger.warning(
+                "Unknown render.theme '%s' in config, using 'white'",
+                raw_theme,
+            )
+            raw_theme = "white"
         render = RenderConfig(
             title=str(render_raw.get("title", "")).strip(),
             label_strip_prefix=bool(
                 render_raw.get("label_strip_prefix", True)
             ),
+            theme=raw_theme,
+            normalization=NormalizationConfig.from_mapping(render_raw.get("normalization")),
+            ingress=IngressConfig.from_mapping(render_raw.get("ingress")),
+            view=ViewConfig.from_mapping(render_raw.get("view")),
         )
 
         # ── edge_types (filtering) ───────────────────────────────────
@@ -372,14 +397,20 @@ def get_app_config(
     *,
     force_reload: bool = False,
 ) -> AppConfig:
-    """Return a module-level cached :class:`AppConfig`.
+    """Return the cached config, honoring an explicitly selected path.
 
-    The first call loads from disk (or *config_path*); subsequent calls
-    return the cached instance unless *force_reload* is ``True``.
+    Calls without a path reuse the current config. An explicit path replaces
+    an earlier default or a config loaded from another file, even when the CLI
+    has already initialized the cache while parsing arguments.
     """
     global _cached_config
-    if _cached_config is None or force_reload:
-        _cached_config = AppConfig.from_yaml(config_path)
+    requested = Path(config_path).expanduser().resolve() if config_path is not None else None
+    if requested is not None:
+        cached_path = _cached_config._source_path if _cached_config is not None else None
+        if _cached_config is None or force_reload or cached_path is None or cached_path.resolve() != requested:
+            _cached_config = AppConfig.from_yaml(requested)
+    elif _cached_config is None or force_reload:
+        _cached_config = AppConfig.from_yaml(None)
     return _cached_config
 
 
