@@ -167,6 +167,24 @@ class TagResolver:
             graph.components[component_name].add_node(cluster_name, node)
             logger.debug("Resolved NODE: %s -> %s/%s", node.name, component_name, cluster_name)
 
+        # Auto uses the established ECS clustering for ECS components. Lambda-only
+        # views have a generic template, so SNS/Kinesis need not be called queues.
+        if self.pattern == "auto":
+            for comp in graph.components.values():
+                kinds = {n.resource_type for cluster in comp.clusters.values() for n in cluster.nodes}
+                if "lambda" not in kinds or "ecs_service" in kinds:
+                    continue
+                messaging = comp.clusters.get("queues")
+                if messaging:
+                    remaining = []
+                    for node in messaging.nodes:
+                        destination = {"sns": "sns", "kinesis": "streams"}.get(node.resource_type)
+                        if destination:
+                            comp.add_node(destination, node)
+                        else:
+                            remaining.append(node)
+                    messaging.nodes = remaining
+
         logger.info(
             "Resolution complete: %d components, %d orphans",
             len(graph.components),
@@ -287,6 +305,11 @@ class TagResolver:
         All other patterns use the flat _ROLE_TO_CLUSTER mapping.
         """
         meta = get_resource_meta(node.resource_type, self.meta_overrides)
+
+        if node.resource_type == "aws_scheduler_schedule":
+            return "rules"
+        if node.resource_type == "aws_apigateway_authorizer":
+            return "security"
 
         # Apply v74 cluster routing for ecs_microservice AND auto (auto defaults to this layout
         # when an ECS service is present, which is the common case for SEND microservices).

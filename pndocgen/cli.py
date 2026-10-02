@@ -28,7 +28,7 @@ import logging
 import argparse
 from pathlib import Path
 
-from pndocgen.engine.core.config import get_app_config
+from pndocgen.engine.core.config import VALID_RENDER_THEMES, get_app_config
 from pndocgen.services.pipeline import (
     discover as discover_service,
     resolve as resolve_service,
@@ -161,6 +161,7 @@ def main() -> None:
 
     # --- discover ---
     p_disc = subparsers.add_parser("discover", help="Discover AWS resources")
+    p_disc.add_argument("--config", default=None, help="Path to central pndocgen.yaml")
     p_disc.add_argument("--profile", required=True, help="AWS profile (e.g. sso_pn-core-dev)")
     p_disc.add_argument("--region", required=True, help="AWS region (e.g. eu-south-1)")
     p_disc.add_argument("--prefix", default=None, help="Resource name prefix filter (default: from pndocgen.yaml project.prefix)")
@@ -195,6 +196,10 @@ def main() -> None:
         "lambda_microservice = Lambda functions as primary compute grid. "
         "Can also be set in pndocgen.yaml (pattern: ecs_microservice)."
     )
+    _theme_help = (
+        "Diagram colour theme. white = transparent cluster fills on a white canvas; "
+        "pastel = colour-coded cluster fills. Overrides render.theme in pndocgen.yaml."
+    )
 
     # --- resolve ---
     p_res = subparsers.add_parser("resolve", help="Resolve inventory into component graph")
@@ -227,7 +232,10 @@ def main() -> None:
     # --- generate ---
     p_gen = subparsers.add_parser("generate", help="Generate D2 diagrams")
     p_gen.add_argument("--graph", default="component_graph.json")
+    p_gen.add_argument("--config", default=None, help="Path to pndocgen.yaml")
     p_gen.add_argument("--component", default=None, help="Generate only for this component")
+    p_gen.add_argument("--ingress-layout", choices=["peers", "legacy"], default=None,
+                       help="Override central ingress layout policy for ECS detailed views")
     p_gen.add_argument("--output-dir", default="docs/generated/",
                        help="Base output directory for generated diagrams (default: docs/generated/)")
     p_gen.add_argument(
@@ -254,12 +262,18 @@ def main() -> None:
         default="simplified",
         help="L3 edge detail level: simplified = box-level edges (default), detailed = node-level edges",
     )
+    p_gen.add_argument(
+        "--theme",
+        choices=sorted(VALID_RENDER_THEMES),
+        default=None,
+        help=_theme_help,
+    )
     p_gen.add_argument("--render", action="store_true", help="Also render an image via d2 CLI")
     p_gen.add_argument(
         "--render-format",
         choices=["png", "svg"],
-        default="png",
-        help="Render output format when --render is enabled (default: png)",
+        default="svg",
+        help="Render output format when --render is enabled (default: svg; PNG skips normalization)",
     )
     p_gen.set_defaults(func=cmd_generate)
 
@@ -277,7 +291,7 @@ def main() -> None:
         default="tag",
         help="How to assign resources to components: tag (Microservice tag), cfn (CloudFormation stacks), both"
     )
-    p_run.add_argument("--config", default=None)
+    p_run.add_argument("--config", default=None, help="Path to pndocgen.yaml")
     p_run.add_argument(
         "--include-dlq",
         action="store_true",
@@ -302,8 +316,8 @@ def main() -> None:
     p_run.add_argument(
         "--render-format",
         choices=["png", "svg"],
-        default="png",
-        help="Render output format when --render is enabled (default: png)",
+        default="svg",
+        help="Render output format when --render is enabled (default: svg; PNG skips normalization)",
     )
     p_run.add_argument(
         "--pattern",
@@ -317,6 +331,12 @@ def main() -> None:
         choices=["simplified", "detailed"],
         default="simplified",
         help="L3 edge detail level: simplified = box-level edges (default), detailed = node-level edges",
+    )
+    p_run.add_argument(
+        "--theme",
+        choices=sorted(VALID_RENDER_THEMES),
+        default=None,
+        help=_theme_help,
     )
     p_run.add_argument(
         "--level",

@@ -79,13 +79,50 @@ discovery:
 # ─── Render Settings ─────────────────────────────────────────────────────────
 # Controls diagram rendering behaviour.
 render:
+  # View-only resource exclusions. Inventory and resolved IR remain unchanged.
+  view:
+    # Replaces the built-in list; [] disables cluster exclusions.
+    # Resource-kind and explicit resource filters still apply.
+    excluded_clusters: [security, misc]
+    exclusions: []
+    # Optional per-component edge rules; see CONFIGURATION.md.
+    edge_exclusions: []
+  ingress:
+    mode: peers
+    components: {}
+  normalization:
+    version: 1
+    enabled: true
+    prefer_free_nodes: true
+    center_singletons: true
+    center_grouped_nodes: true
+    separate_edge_labels: true
+    max_label_shift: 120
+    max_shift: 120
+    min_gap: 24
+    min_terminal: 10
+    max_node_shift: 30
+    fit_text_containers: true
+    text_container_margin: 16
+    max_container_growth: 240
+    port_capacity_classes: [ecs_hero]
+    max_port_icon_growth: 24
+    port_icon_padding: 2
+    align_node_labels: true
+    node_label_gap: 4
+    separate_container_titles: true
+    max_title_shift: 120
   # Override the L2 service-map title.  Blank → uses "{description} Service Map".
   title: ""
   # Strip project.prefix from node labels for cleaner diagrams.
   label_strip_prefix: true
+  # Cluster fill theme: white (transparent fills on white canvas) or pastel.
+  # Can be overridden per run with: pn-docgen generate --theme pastel
+  theme: white
 
 # ─── Diagrams ─────────────────────────────────────────────────────────────────
-# Each diagram entry defines what to include/exclude and how to render it.
+# Historical examples only: this section is not consumed by the CLI.
+# Use render.view.exclusions for supported view-only resource exclusions.
 diagrams:
 
   - name: "pn-delivery"
@@ -160,6 +197,8 @@ pattern: auto
 
 # ─── Edge Type Filtering ──────────────────────────────────────────────────────
 # Controls which edge types are rendered in L3 diagrams.
+# Full instructions and resource filters: CONFIGURATION.md.
+# These filters apply globally to this configuration, not per component.
 #
 # Logic:
 #   include: [...]  → render ONLY the listed types (whitelist mode)
@@ -175,7 +214,10 @@ pattern: auto
 #   apigw_integration  — API Gateway → Lambda or ECS
 #   eventbridge_trigger— EventBridge Rule → ECS / Lambda / SQS
 #   dynamodb_stream    — DynamoDB Stream → Lambda (EventSourceMapping)
+#   kinesis_trigger    — Kinesis Stream → Lambda (EventSourceMapping)
+#   scheduler_trigger  — Scheduler Schedule → Lambda (local CFN enrichment)
 #   sns_subscription   — SNS Topic → SQS queue / Lambda
+# Names match graph edges[].type exactly; see guide for static-analysis aliases.
 #
 edge_types:
   include: []   # empty = no whitelist (show all unless excluded)
@@ -197,7 +239,8 @@ edge_types:
 resource_kinds:
   skip:
     # WAF and Target Groups are implementation details at L3 level.
-    # Remove these lines to show them in the diagram.
+    # Remove these lines to restore built-in classification; rendering still
+    # depends on the selected template's supported clusters (CONFIGURATION.md).
     - aws_wafv2_webacl
     - target_group
 

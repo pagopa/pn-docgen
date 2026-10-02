@@ -33,15 +33,31 @@ htmlcov/
 # pn-docgen: generated artefacts (safe to delete, regenerate with pipeline)
 # User policy: do not push anything from docs/ or generated/
 inventory*.json
+*_inventory.json
 component_graph.json
 graph*.json
+*_graph.json
+*.resolve.json
+*.view.json
+*.raw.json
+*_analysis.json
+component_analysis.json
 docs/
 generated/
 diagrams/
 *.d2
 *.png
+*.svg
+!tests/fixtures/*.svg
+
+# Local experiment results and rollback snapshots may contain live-derived data.
+# Keep the entire trees out of accidental `git add -A`; experiment scripts remain local.
+/experiments/
+/checkpoints/
+/poc/
 
 # pn-docgen: bundled AWS icons (downloaded once by scripts/download_aws_icons.py)
-# Do NOT commit these — they are MIT-licensed PNGs from awslabs/aws-icons-for-plantuml.
+# Do NOT commit these by default; the artwork is CC BY-ND 2.0, not OSS.
+# NOTICE.txt next to the PNGs is not ignored and must travel with any release.
 # Re-download: python scripts/download_aws_icons.py
 pndocgen/engine/d2/icons/aws/*.png
