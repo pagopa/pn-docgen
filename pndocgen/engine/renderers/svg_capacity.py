@@ -13,9 +13,11 @@ from pndocgen.engine.renderers.svg_containers import text_audit, text_conflicts
 
 
 def fit_ports(source, destination, *, allowed_classes=('ecs_hero',), max_growth=24, max_shift=30,
-              padding=2, contracts=None, min_gap=24):
+              padding=2, contracts=None, min_gap=24, min_terminal=10):
     if any(type(v) not in (float,int) or not math.isfinite(v) or v<0 for v in (max_growth,max_shift,padding,min_gap)):
         raise ValueError('Port capacity limits must be finite and nonnegative')
+    if type(min_terminal) not in (float, int) or not math.isfinite(min_terminal) or min_terminal < 10:
+        raise ValueError('min_terminal must be finite and at least 10px')
     if source.resolve() == destination.resolve() or destination.exists():
         raise FileExistsError(destination)
     before = Diagram.load(source)
@@ -74,7 +76,7 @@ def fit_ports(source, destination, *, allowed_classes=('ecs_hero',), max_growth=
             growth = (size-(w if axis=='x' else h))/2
             _shift_endpoint(edge,at_source,axis,growth if positive else -growth)
         failure = _valid(after,_attachments(before),non_orthogonal_segments(before),collisions(before),_label_distances(before))
-        failure = failure or _straight_direction_checks(before,after,10)
+        failure = failure or _straight_direction_checks(before,after,min_terminal)
         old_order=sorted(siblings,key=lambda n:(n.center[index],n.node_id))
         new_order=sorted(after.children_of(old_node.cluster_id),key=lambda n:(n.center[index],n.node_id))
         if [n.node_id for n in old_order] != [n.node_id for n in new_order]:

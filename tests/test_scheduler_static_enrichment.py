@@ -10,6 +10,31 @@ import pytest
 from pndocgen.services import pipeline
 
 
+@pytest.mark.parametrize('target', [
+    '{Fn::GetAtt: [!Ref Worker, Arn]}',
+    '!GetAtt [!Ref Worker, Arn]',
+    '!GetAtt [Worker, !Sub Arn]',
+    '{Fn::GetAtt: [{Ref: Worker}, Arn]}',
+    '{Fn::GetAtt: [Worker, {Fn::Sub: Arn}]}',
+    '!GetAtt [!Unknown Worker, Arn]',
+    '!GetAtt [!Join ["", [Worker]], Arn]',
+    '!GetAtt [Worker, !If [Condition, Arn, Arn]]',
+])
+def test_dynamic_getatt_operands_never_create_scheduler_edge(tmp_path, target):
+    repo, inventory = write_case(tmp_path, target)
+    graph, report, _ = resolve(tmp_path, inventory, repo)
+    assert not any(edge['type'] == 'scheduler_trigger' for edge in graph['edges'])
+    assert report['static_scheduler_bindings'][0]['status'] == 'unsupported_target_expression'
+
+
+@pytest.mark.parametrize('target', ['!GetAtt [Worker, Arn]', '{Fn::GetAtt: Worker.Arn}'])
+def test_literal_getatt_forms_remain_supported(tmp_path, target):
+    repo, inventory = write_case(tmp_path, target)
+    graph, report, _ = resolve(tmp_path, inventory, repo)
+    assert any(edge['type'] == 'scheduler_trigger' for edge in graph['edges'])
+    assert report['static_scheduler_bindings'][0]['status'] == 'resolved_into_graph'
+
+
 def write_case(tmp_path: Path, target: str, *, duplicate_lambda: bool = False):
     repo = tmp_path / "pn-synthetic"
     template = repo / "scripts/aws/cfn/microservice.yml"

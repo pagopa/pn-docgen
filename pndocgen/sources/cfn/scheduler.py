@@ -13,21 +13,23 @@ import re
 import yaml
 
 from pndocgen.engine.core.config import AppConfig
-from pndocgen.sources.cfn.yaml_loader import _CfnLoader, _cfn_any
+from pndocgen.sources.cfn.yaml_loader import _cfn_any
 
 
 _DIRECT_ARN = re.compile(r"([A-Za-z][A-Za-z0-9]*)\.Arn")
 
 
-class _ScheduleLoader(_CfnLoader):
-    """Preserve GetAtt's identity; the generic CFN loader erases its YAML tag."""
+class _ScheduleLoader(yaml.SafeLoader):
+    """Preserve every intrinsic tag, including nested and unknown expressions."""
 
 
-def _getatt(loader: yaml.SafeLoader, node: yaml.Node) -> dict:
-    return {"Fn::GetAtt": _cfn_any(loader, node)}
+def _intrinsic(loader: yaml.SafeLoader, tag: str, node: yaml.Node) -> dict:
+    # Only GetAtt is interpreted; all other tagged values remain non-literals.
+    key = 'Fn::GetAtt' if tag == 'GetAtt' else '!' + tag
+    return {key: _cfn_any(loader, node)}
 
 
-_ScheduleLoader.add_constructor("!GetAtt", _getatt)
+_ScheduleLoader.add_multi_constructor('!', _intrinsic)
 
 
 def _direct_getatt_arn(value) -> str | None:

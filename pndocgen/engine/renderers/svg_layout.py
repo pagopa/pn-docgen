@@ -89,7 +89,8 @@ def normalize_layout(source: Path, destination: Path, contracts,
                 report['port_capacity'] = fit_ports(
                     current, target, allowed_classes=settings.port_capacity_classes,
                     max_growth=settings.max_port_icon_growth, max_shift=settings.max_node_shift,
-                    padding=settings.port_icon_padding, contracts=contracts, min_gap=settings.min_gap)
+                    padding=settings.port_icon_padding, contracts=contracts, min_gap=settings.min_gap,
+                    min_terminal=settings.min_terminal)
                 current = target
             # Correct ragged-grid label gaps before fitting the boundaries.
             if settings.align_node_labels:

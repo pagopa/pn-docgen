@@ -206,6 +206,34 @@ def test_capacity_preserves_far_endpoints_and_square_icon(tmp_path,font_css):
     assert second.read_bytes() == out.read_bytes()
 
 
+@pytest.mark.parametrize('pipeline_mode', [False, True])
+def test_capacity_honors_configured_terminal_floor(tmp_path, font_css, pipeline_mode):
+    from pndocgen.engine.renderers.svg_capacity import fit_ports
+    from pndocgen.engine.renderers.svg_layout import normalize_layout
+    source = capacity_source(tmp_path, font_css)
+    contracts = {'rules': {'layout': 'column', 'columns': 1}}
+    # Existing terminals are 208px; icon growth shortens them by 9px.
+    # 205 therefore permits the input, but must reject that transformation.
+    for floor in (10, 205):
+        out = tmp_path / f'floor-{floor}.svg'
+        if pipeline_mode:
+            settings = NormalizationConfig(
+                min_terminal=floor, fit_text_containers=False,
+                prefer_free_nodes=False, center_singletons=False,
+                center_grouped_nodes=False, separate_edge_labels=False,
+                align_node_labels=False, separate_container_titles=False,
+                max_shift=0)
+            result = normalize_layout(source, out, contracts, settings)['port_capacity']
+        else:
+            result = fit_ports(source, out, contracts=contracts, min_terminal=floor)
+        assert bool(result['applied']) == (floor == 10), result
+        if floor == 205:
+            assert any('min_terminal' in reason for _, reason in result['skipped'])
+            assert Diagram.load(out).nodes['rules.n0'].box == Diagram.load(source).nodes['rules.n0'].box
+            assert [e.path.element.get('d') for e in Diagram.load(out).edges] == [
+                e.path.element.get('d') for e in Diagram.load(source).edges]
+
+
 def test_centered_overfull_bundle_is_resized(tmp_path, font_css):
     from pndocgen.engine.renderers.svg_capacity import fit_ports
     source = capacity_source(tmp_path, font_css)
