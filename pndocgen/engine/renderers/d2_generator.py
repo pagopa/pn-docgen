@@ -26,6 +26,17 @@ from pndocgen.engine.renderers.view import prepare_view, account_rendered_edges
 from pndocgen.engine.renderers.assets import annotate_svg_icons, portable_icons
 from pndocgen.engine.renderers.svg_raster import raster_backend, rasterize_svg
 
+# Pinned D2 0.7.1 keywords, plus the parent-scope token. Keep resource IDs out
+# of the language namespace. Source: terrastruct/d2 v0.7.1 d2ast/keywords.go.
+_D2_RESERVED = frozenset('''
+label shape icon constraint tooltip link near width height direction top left
+grid-rows grid-columns grid-gap vertical-gap horizontal-gap class vars style
+source-arrowhead target-arrowhead classes opacity stroke fill fill-pattern
+stroke-width stroke-dash border-radius font font-size font-color bold italic
+underline text-transform shadow multiple double-border 3d animated filled
+layers scenarios steps _
+'''.split())
+
 logger = logging.getLogger(__name__)
 
 
@@ -526,6 +537,23 @@ class D2Generator:
 
         # Component names present in the graph (used for cross-edge filtering)
         component_names: set[str] = set(graph.components.keys())
+        compute_owners: dict[str, set[str]] = {}
+        for comp_name, component in graph.components.items():
+            for cluster in component.clusters.values():
+                for node in cluster.nodes:
+                    if node.resource_type in {'ecs_service', 'lambda'}:
+                        compute_owners.setdefault(node.name, set()).add(comp_name)
+
+        def http_owner(endpoint):
+            owners = compute_owners.get(endpoint, set()) | (
+                {endpoint} if endpoint in component_names else set())
+            if len(owners) > 1:
+                raise ValueError(f'Ambiguous L2 endpoint: {endpoint}')
+            return next(iter(owners), None)
+
+        identifiers = [self._safe_id(name) for name in graph.components]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError('D2 identifier collision between L2 components')
 
         # ── Build component node dicts ────────────────────────────────────────
         comp_dicts = []
@@ -547,18 +575,20 @@ class D2Generator:
         edge_dicts = []
         seen: set[tuple] = set()
         for edge in graph.edges:
-            # Only render edges where BOTH source AND target are known components.
-            # Intra-component edges (resource→resource within a component) are
-            # ignored at L2 — they belong to L3 diagrams.
-            if edge.source not in component_names or edge.target not in component_names:
+            # HTTP discovery may identify compute resources instead of components.
+            # Project only unique owners in this view; never rewrite the L3 graph.
+            source, target = edge.source, edge.target
+            if edge.edge_type == 'http_call':
+                source, target = http_owner(source), http_owner(target)
+            if source not in component_names or target not in component_names or source == target:
                 continue
-            key = (edge.source, edge.target, edge.edge_type)
+            key = (source, target, edge.edge_type)
             if key in seen:
                 continue
             seen.add(key)
             edge_dicts.append({
-                "from_id":  self._safe_id(edge.source),
-                "to_id":    self._safe_id(edge.target),
+                "from_id":  self._safe_id(source),
+                "to_id":    self._safe_id(target),
                 "label":    _display_edge_label(edge, edge.edge_type),
                 "edge_type": edge.edge_type,
                 "animated": edge.edge_type in _ANIMATED_EDGE_TYPES,
@@ -748,7 +778,9 @@ class D2Generator:
     def _safe_id(name: str) -> str:
         """Convert resource name to a valid D2 identifier (no hyphens/dots)."""
         candidate = name.replace("-", "_").replace(".", "_")
-        if re.fullmatch(r"[A-Za-z0-9_]+", candidate):
+        if (re.fullmatch(r"[A-Za-z0-9_]+", candidate)
+                and candidate.lower() not in _D2_RESERVED
+                and not candidate.lower().startswith('resource_')):
             return candidate
         return "resource_" + name.encode("utf-8").hex()
 

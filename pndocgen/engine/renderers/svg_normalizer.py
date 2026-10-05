@@ -164,6 +164,7 @@ def _valid(
 
 def _align(diagram: Diagram, report: Report) -> Diagram:
     """S3/S4: porta i nodi fuori asse sull'asse di maggioranza del cluster."""
+    from pndocgen.engine.renderers.svg_containers import measured_text_gate
     baseline = _attachments(diagram)
     baseline_skew = non_orthogonal_segments(diagram)
     baseline_collisions = collisions(diagram)
@@ -186,6 +187,7 @@ def _align(diagram: Diagram, report: Report) -> Diagram:
         if not applied:
             continue
         failure = _valid(diagram, baseline, baseline_skew, baseline_collisions, baseline_labels)
+        failure = failure or measured_text_gate(_reload(snapshot, diagram.path), diagram)
         if failure is None:
             report.aligned.extend(applied)
         else:
@@ -196,6 +198,7 @@ def _align(diagram: Diagram, report: Report) -> Diagram:
 
 def _center_ports(diagram: Diagram, report: Report) -> Diagram:
     """S5: centra il fascio di archi di un lato sul centro visibile del nodo."""
+    from pndocgen.engine.renderers.svg_containers import measured_text_gate
     baseline = _attachments(diagram)
     baseline_skew = non_orthogonal_segments(diagram)
     baseline_collisions = collisions(diagram)
@@ -233,6 +236,7 @@ def _center_ports(diagram: Diagram, report: Report) -> Diagram:
             _valid(diagram, baseline, baseline_skew, baseline_collisions, baseline_labels)
             if moved else "nessun arco spostabile"
         )
+        failure = failure or measured_text_gate(_reload(snapshot, diagram.path), diagram)
         if moved and failure is None:
             report.centered.append(f"{span.node_id} {span.side} {delta:+.1f} ({moved} archi)")
         else:
@@ -275,8 +279,9 @@ def normalize_svg(
     ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
     report = Report()
     root = tree.getroot()
-    if any(e.get("transform") for e in root.iter()):
-        report.skipped.append(("svg", "coordinate trasformate non supportate"))
+    if any(e.get(attribute) for e in root.iter()
+           for attribute in ('transform', 'filter', 'clip-path')):
+        report.skipped.append(("svg", "coordinate trasformate o effetti SVG non supportati"))
         if destination != source:
             destination.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(destination, source.read_bytes())

@@ -71,6 +71,11 @@ def text_conflicts(diagram):
 
 def measured_text_gate(before, after):
     """Reject new measured text defects; existing defects are not silently fixed."""
+    if any(element.get(attribute)
+           for diagram in (before, after)
+           for element in diagram.tree.getroot().iter()
+           for attribute in ('transform', 'filter', 'clip-path')):
+        return 'unsupported SVG effects prevent safe layout edits'
     old_audit, _ = text_audit(before)
     new_audit, _ = text_audit(after)
     if old_audit['unmeasured'] or new_audit['unmeasured']:
@@ -209,6 +214,7 @@ def fit_containers(source: Path, destination: Path, contracts, *, margin=16.0, m
                 c = parent
             _, proposed_boxes = text_audit(candidate)
             reason = reason or _check(diagram, candidate, boxes, proposed_boxes, changed)
+            reason = reason or measured_text_gate(diagram, candidate)
             if reason:
                 report['skipped'].append({'cluster': key, 'reason': reason})
                 continue

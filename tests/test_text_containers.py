@@ -188,6 +188,136 @@ def capacity_source(tmp_path,font_css):
     return source
 
 
+@pytest.mark.parametrize('with_label', [False, True])
+def test_initial_alignment_checks_measured_text_before_publication(tmp_path, font_css, with_label):
+    from test_explicit_alignment import fixture
+    from pndocgen.engine.renderers.svg_normalizer import normalize_svg
+    from pndocgen.engine.renderers.svg_layout import normalize_layout
+    from pndocgen.engine.renderers.svg_containers import text_conflicts
+    source = fixture(tmp_path, [('group.a', 100, 100, 'rect'),
+        ('group.b', 100, 200, 'rect'), ('group.c', 80, 300, 'rect')],
+        [('outside.a', 'outside.b', 'M 105 325 L 105 350')])
+    tree = ET.parse(source)
+    ET.SubElement(tree.getroot(), NS+'style').text = font_css
+    if with_label:
+        node = Diagram.from_tree(tree, source).nodes['group.c']
+        ET.SubElement(node.group, NS+'text', {'x':'80', 'y':'340',
+            'class':'text-bold', 'style':'text-anchor:middle;font-size:10px'}).text = 'Short'
+    tree.write(source)
+    assert not text_conflicts(Diagram.load(source))
+    normalized = tmp_path/'normalized.svg'
+    report = normalize_svg(source, normalized)
+    assert bool(report.aligned) == (not with_label), report
+    assert not text_conflicts(Diagram.load(normalized))
+    if with_label:
+        assert any('new text collision' in reason for reason in report.rolled_back)
+        assert Diagram.load(normalized).nodes['group.c'].center == (80, 300)
+    final = tmp_path/'final.svg'
+    normalize_layout(normalized, final, {'group':{'layout':'column','columns':1}}, NormalizationConfig())
+    assert not text_conflicts(Diagram.load(final))
+
+
+@pytest.mark.parametrize('with_label', [False, True])
+def test_initial_port_centering_checks_measured_text(tmp_path, font_css, with_label):
+    from test_svg_normalizer import _collision_fixture
+    from pndocgen.engine.renderers.svg_normalizer import normalize_svg
+    from pndocgen.engine.renderers.svg_containers import text_conflicts
+    source = _collision_fixture(tmp_path)
+    tree = ET.parse(source)
+    root = tree.getroot()
+    diagram = Diagram.from_tree(tree, source)
+    root.remove(diagram.nodes['obstacle'].group)
+    ET.SubElement(root, NS+'style').text = font_css
+    if with_label:
+        ET.SubElement(diagram.nodes['dst1'].group, NS+'text', {'x':'80', 'y':'32',
+            'class':'text-bold', 'style':'text-anchor:middle;font-size:10px'}).text = 'Short'
+    tree.write(source)
+    assert not text_conflicts(Diagram.load(source))
+    out = tmp_path/'normalized.svg'
+    report = normalize_svg(source, out)
+    assert bool(report.centered) == (not with_label), report
+    assert not text_conflicts(Diagram.load(out))
+    if with_label:
+        assert any('new text collision' in reason for reason in report.rolled_back)
+        assert [e.path.element.get('d') for e in Diagram.load(out).edges] == [
+            e.path.element.get('d') for e in Diagram.load(source).edges]
+
+
+@pytest.mark.parametrize('effect', ['filter', 'clip-path'])
+def test_initial_normalization_preserves_unsupported_effects(tmp_path, effect):
+    from test_svg_normalizer import _collision_fixture
+    from pndocgen.engine.renderers.svg_normalizer import normalize_svg
+    source = _collision_fixture(tmp_path)
+    tree = ET.parse(source)
+    tree.getroot().set(effect, 'url(#effect)')
+    tree.write(source)
+    before = source.read_bytes()
+    out = tmp_path/'normalized.svg'
+    report = normalize_svg(source, out)
+    assert report.skipped
+    assert out.read_bytes() == before
+
+
+@pytest.mark.parametrize('effect', ['clip-path', 'filter'])
+@pytest.mark.parametrize('side', ['before', 'after'])
+def test_shared_text_gate_rejects_unmodeled_effects(tmp_path, font_css, effect, side):
+    from pndocgen.engine.renderers.svg_containers import measured_text_gate
+    source, _ = synthetic(tmp_path, font_css)
+    before, after = Diagram.load(source), Diagram.load(source)
+    diagram = before if side == 'before' else after
+    diagram.nodes['rules.n0'].group.set(effect, 'url(#effect)')
+    assert 'unsupported SVG effects' in (measured_text_gate(before, after) or '')
+
+
+@pytest.mark.parametrize('pipeline_mode', [False, True])
+def test_container_fitting_rejects_new_incident_edge_label_collision(tmp_path, font_css, pipeline_mode):
+    from pndocgen.engine.renderers.svg_containers import text_conflicts
+    source, contracts = synthetic(tmp_path, font_css)
+    tree = ET.parse(source)
+    root = tree.getroot()
+    encoded = base64.b64encode(b'(rules.n0 -> sink)[0]').decode()
+    edge = ET.SubElement(root, NS+'g', {'class': encoded})
+    ET.SubElement(edge, NS+'path', {'d': 'M 192 135 L 450 135'})
+    label = ET.SubElement(edge, NS+'text', {'x': '160', 'y': '85',
+        'class': 'text-bold', 'style': 'text-anchor:middle;font-size:10px'})
+    label.text = 'reads'
+    tree.write(source)
+    before = source.read_bytes()
+    out = tmp_path/'fitted.svg'
+    if pipeline_mode:
+        from pndocgen.engine.renderers.svg_layout import normalize_layout
+        settings = NormalizationConfig(separate_container_titles=False,
+            prefer_free_nodes=False, center_singletons=False, center_grouped_nodes=False,
+            separate_edge_labels=False, align_node_labels=False, port_capacity_classes=(), max_shift=0)
+        report = normalize_layout(source, out, contracts, settings)['text_containers']
+    else:
+        report = fit_containers(source, out, contracts)
+    assert not report['applied'], report
+    assert any('new text collision' in item['reason'] for item in report['skipped'])
+    assert out.read_bytes() == before
+    assert text_conflicts(Diagram.load(out)) == text_conflicts(Diagram.load(source))
+
+
+@pytest.mark.parametrize('effect', ['clip-path', 'filter'])
+def test_alignment_abstains_when_effect_bounds_are_unknown(tmp_path, effect):
+    from test_explicit_alignment import fixture
+    from pndocgen.engine.renderers.svg_alignment import normalize, Rule
+    from pndocgen.engine.renderers.svg_preferences import _gate
+    source = fixture(tmp_path, [('group.a', 100, 100, 'rect'), ('group.b', 130, 200, 'rect')])
+    control = tmp_path/'control.svg'
+    assert normalize(source, control, {'group': Rule('column')})['applied']
+    tree = ET.parse(source)
+    tree.getroot().set(effect, 'url(#effect)')
+    tree.write(source)
+    before = source.read_bytes()
+    out = tmp_path/'guarded.svg'
+    result = normalize(source, out, {'group': Rule('column')})
+    assert not result['applied']
+    assert any('unsupported SVG effects' in item['reason'] for item in result['skipped'])
+    assert out.read_bytes() == before
+    assert 'unsupported SVG effects' in _gate(Diagram.load(source), Diagram.load(source))
+
+
 def test_capacity_preserves_far_endpoints_and_square_icon(tmp_path,font_css):
     from pndocgen.engine.renderers.svg_capacity import fit_ports
     from pndocgen.engine.renderers.svg_geometry import find_port_spans
