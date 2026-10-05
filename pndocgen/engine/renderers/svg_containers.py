@@ -141,7 +141,8 @@ def _check(before, after, boxes_before, boxes_after, changed):
     return None
 
 
-def fit_containers(source: Path, destination: Path, contracts, *, margin=16.0, max_growth=240.0):
+def fit_containers(source: Path, destination: Path, contracts, *, margin=16.0, max_growth=240.0,
+                   original_widths=None):
     import math
     if not all(math.isfinite(v) and v >= 0 for v in (margin, max_growth)):
         raise ValueError('Container fitting limits must be finite and nonnegative')
@@ -171,12 +172,12 @@ def fit_containers(source: Path, destination: Path, contracts, *, margin=16.0, m
             # The same growth, route and neighbor guards still apply below.
             snapshot = _serialize(diagram)
             candidate = _reload(snapshot, source)
-            _, proposed_boxes = text_audit(candidate)
             c = candidate.containers[key]
             axis = statistics.median(n.center[0] for n in nodes)
             contents = union(visual(n, boxes) for n in nodes)
             half = max(axis-contents[0], contents[0]+contents[2]-axis,
-                       *(boxes[t][2]/2 for t in diagram.containers[key].texts), c.box[2]/2-margin) + margin
+                       *(boxes[t][2]/2 for t in diagram.containers[key].texts),
+                       (original_widths or {}).get(key, c.box[2])/2-margin) + margin
             proposed = (axis-half, c.box[1], half*2, c.box[3])
             reason = None
             if proposed[2] > c.box[2] + max_growth + EPS:

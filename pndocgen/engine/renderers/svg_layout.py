@@ -15,6 +15,7 @@ from pndocgen.engine.renderers.svg_containers import fit_containers
 from pndocgen.engine.renderers.svg_capacity import fit_ports
 from pndocgen.engine.renderers.svg_node_labels import align_node_labels
 from pndocgen.engine.renderers.svg_titles import separate_container_titles
+from pndocgen.engine.renderers.svg_geometry import Diagram
 
 CONTRACT_PREFIX = "# pndocgen-layout: "
 
@@ -47,6 +48,10 @@ def normalize_layout(source: Path, destination: Path, contracts,
     with tempfile.TemporaryDirectory(prefix=".svg-layout-", dir=source.parent) as folder:
         staging = Path(folder)
         if settings.enabled and contracts is not None:
+            # Final fitting may undo temporary preparatory growth, but never
+            # shrink below the original D2/normalizer container width.
+            original_widths = {key: node.box[2] for key, node in
+                               Diagram.load(source).containers.items()}
             rules = {name: Rule(**values, max_shift=settings.max_shift,
                                min_gap=settings.min_gap, min_terminal=settings.min_terminal)
                      for name, values in sorted(contracts.items())}
@@ -95,7 +100,7 @@ def normalize_layout(source: Path, destination: Path, contracts,
                 target = staging / "containers.svg"
                 report["text_containers"] = fit_containers(
                     current, target, contracts, margin=settings.text_container_margin,
-                    max_growth=settings.max_container_growth)
+                    max_growth=settings.max_container_growth, original_widths=original_widths)
                 current = target
             if settings.separate_container_titles:
                 target = staging / 'container-titles.svg'

@@ -153,29 +153,15 @@ order-inverted generation is tested byte-for-byte. D2 builds may record
 `0.7.1` or `v0.7.1` in the SVG version attribute: this metadata difference does
 not change geometry. Pin the actual platform binary for stable byte diffs.
 
-## Known limits
+## PNG export
 
-- SVG alignment is conservative: unsafe moves are skipped. No universal
-  guarantee against long-label overflow, nested-container defects or dense
-  edge crossings; detailed large components can remain difficult to read.
-- Text-aware column fitting uses embedded WOFF fonts through fontTools, not a
-  browser. Unsupported shaping/fonts, unsafe growth or collisions are reported
-  as abstentions. The verified corpus no longer has the reported Paper Channel
-  text overflow; this is not a guarantee for arbitrary diagrams.
-- Overfull bundles can use bounded icon growth for configured SVG classes;
-  default `ecs_hero` only, leaving ordinary icons uniformly sized. Other routes
-  can still require a different layout. Node-label gaps are normalized only
-  where measured collision checks permit.
-- PNG is rasterized from the final normalized SVG using optional resvg-py 0.5.0
-  (Rust resvg 0.48.1). Install with `pip install '.[raster]'`, then use
-  `--render --render-format png`. Both the canonical SVG and PNG are saved.
-  Only fonts embedded by D2 are used; system fonts are disabled. The PNG keeps
-  icon attribution and the source SVG SHA-256 in its metadata. Rendering is
-  local; there are no font downloads. Images over 40 megapixels and unsupported
-  embedded text fail explicitly. Existing output files are never overwritten.
-- The parser/normalizer is validated against D2 0.7.1, not arbitrary versions.
-- Cross-account topology, automatic public publication and release PR Actions
-  are outside this version's scope.
+PNG is rasterized from the final normalized SVG using optional resvg-py 0.5.0
+(Rust resvg 0.48.1). Install with `pip install '.[raster]'`, then use
+`--render --render-format png`. Both the canonical SVG and PNG are saved.
+Only fonts embedded by D2 are used; system fonts are disabled. The PNG keeps
+icon attribution and the source SVG SHA-256 in its metadata. Rendering is
+local; there are no font downloads. Images over 40 megapixels and unsupported
+embedded text fail explicitly. Existing output files are never overwritten.
 
 ## Licenses
 

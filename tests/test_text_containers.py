@@ -127,6 +127,27 @@ def test_pipeline_fits_text_before_safe_alignment(tmp_path, font_css):
     assert out.read_bytes() == repeat.read_bytes()
 
 
+def test_final_fitting_reclaims_temporary_width_without_shrinking_original(tmp_path, font_css):
+    from pndocgen.engine.renderers.svg_layout import normalize_layout
+    source, contracts = synthetic(tmp_path, font_css)
+    tree = ET.parse(source)
+    diagram = Diagram.from_tree(tree, source)
+    for node in diagram.nodes.values():
+        node.texts[0].text = 'Short'
+    diagram.nodes['rules.n1'].translate(200, 0)
+    tree.write(source)
+    out = tmp_path/'compact.svg'
+    report = normalize_layout(source, out, contracts, NormalizationConfig())
+    assert report['initial_text_containers']['applied'][0]['after'][2] > 280
+    after = Diagram.load(out)
+    assert after.containers['rules'].box[2] == 280
+    assert len({n.center[0] for n in after.nodes.values()}) == 1
+    assert not text_audit(after)[0]['overflow']
+    repeat = tmp_path/'compact-repeat.svg'
+    normalize_layout(out, repeat, contracts, NormalizationConfig())
+    assert out.read_bytes() == repeat.read_bytes()
+
+
 def test_shaping_and_tspan_are_not_guessed(tmp_path, font_css):
     source, _ = synthetic(tmp_path, font_css)
     diagram = Diagram.load(source)
