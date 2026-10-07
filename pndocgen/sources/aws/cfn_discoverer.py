@@ -176,6 +176,11 @@ def _normalize_name(physical_id: str, cfn_type: str, logical_id: str) -> str:
     """
     pid = physical_id
 
+    if cfn_type in {'AWS::KinesisFirehose::DeliveryStream', 'AWS::S3Tables::TableBucket'}:
+        return pid.rsplit('/', 1)[-1]
+    if cfn_type == 'AWS::S3Tables::Table':
+        return logical_id or pid
+
     if cfn_type == "AWS::Lambda::Function":
         return _lambda_name(pid)
 
@@ -263,6 +268,10 @@ class CfnLiveDiscoverer:
         max_nested_depth: int = 3,
         app_config: Optional[AppConfig] = None,
     ):
+        self._session = session
+        self.dataflow_links: list[dict] = []
+        self.dataflow_descriptions: dict = {}
+        self.dataflow_scopes: set[tuple[str, str, str]] = set()
         self.cfn = session.client("cloudformation", region_name=region)
         self.lmb = session.client("lambda", region_name=region)
         self.ecs = session.client("ecs", region_name=region)
@@ -390,6 +399,8 @@ class CfnLiveDiscoverer:
         self._enrich_eventbridge_targets()
         self._enrich_apigw_ecs()
         self._enrich_sns_subscriptions()
+        from pndocgen.sources.aws.dataflows import enrich
+        enrich(self, self._session)
 
         logger.info(
             "[cfn-live] Discovery complete: %d resources across %d components",
@@ -744,6 +755,8 @@ class CfnLiveDiscoverer:
                 edge["source"] = self._queue_rawname_to_norm.get(edge["source"], edge["source"])
             if edge["type"] in {"sqs_producer", "sns_subscription", "eventbridge_trigger"}:
                 edge["target"] = self._queue_rawname_to_norm.get(edge["target"], edge["target"])
+        from pndocgen.sources.aws.dataflows import resolved_links
+        edges.extend(resolved_links(self))
         return edges
 
     def _register_lambda_storage_access(
@@ -797,6 +810,9 @@ class CfnLiveDiscoverer:
         ):
             for resource in page.get("ResourceTagMappingList", []):
                 arn = resource["ResourceARN"]
+                arn_parts = arn.split(':', 5)
+                if len(arn_parts) == 6:
+                    self.dataflow_scopes.add((arn_parts[1], arn_parts[3], arn_parts[4]))
                 tags = {t["Key"]: t["Value"] for t in resource.get("Tags", [])}
                 component = tags.get(self.tag_key, "")
                 if not component:
@@ -1699,7 +1715,9 @@ class CfnLiveDiscoverer:
                 if event_bus_name:
                     params["EventBusName"] = event_bus_name
 
-                for target in _paged_items(self.events, "list_targets_by_rule", "Targets", **params):
+                targets = list(_paged_items(self.events, "list_targets_by_rule", "Targets", **params))
+                self.dataflow_descriptions['eventbridge:' + entry['physical_id']] = {'Targets': targets}
+                for target in targets:
                     target_arn = target.get("Arn", "")
 
                     if ":ecs:" in target_arn:
@@ -1720,6 +1738,8 @@ class CfnLiveDiscoverer:
                                         ecs_comp,
                                     )
                                 break
+                        else:
+                            self._record_issue('unresolved_eventbridge_ecs_target', entry['physical_id'], target_arn)
 
                     elif ":lambda:" in target_arn or ":function:" in target_arn:
                         # EventBridge → Lambda
@@ -1755,6 +1775,16 @@ class CfnLiveDiscoverer:
                                 rule_display_name,
                                 queue_name,
                             )
+
+                    else:
+                        from pndocgen.sources.aws.dataflows import arn_type, add_link
+                        target_type = arn_type(target_arn)
+                        if target_type:
+                            add_link(self, 'AWS::Events::Rule', entry['physical_id'],
+                                     target_type, target_arn, 'eventbridge_trigger',
+                                     'triggers', 'eventbridge_target_configuration')
+                        else:
+                            self._record_issue('unsupported_eventbridge_target', entry['physical_id'], target_arn)
 
             except Exception as e:
                 self._record_issue("list_targets_by_rule", entry["physical_id"], e)

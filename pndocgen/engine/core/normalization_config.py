@@ -26,11 +26,12 @@ class NormalizationConfig:
     node_label_gap: float = 4.0
     separate_container_titles: bool = True
     max_title_shift: float = 120.0
+    separate_node_labels: bool = True
 
     def __post_init__(self):
         if type(self.version) is not int or self.version != 1:
             raise ValueError("render.normalization.version must be 1")
-        for name in ("enabled", "prefer_free_nodes", "center_singletons", "center_grouped_nodes", "separate_edge_labels", "fit_text_containers", "align_node_labels", "separate_container_titles"):
+        for name in ("enabled", "prefer_free_nodes", "center_singletons", "center_grouped_nodes", "separate_edge_labels", "fit_text_containers", "align_node_labels", "separate_container_titles", "separate_node_labels"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"render.normalization.{name} must be boolean")
         for name in ("max_shift", "min_gap", "min_terminal", "max_node_shift", "max_label_shift", "text_container_margin", "max_container_growth", "max_port_icon_growth", "port_icon_padding", "node_label_gap", "max_title_shift"):

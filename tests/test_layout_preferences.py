@@ -70,6 +70,21 @@ def test_impossible_straight_bundles_are_preserved(tmp_path):
     assert target.read_bytes() == source.read_bytes()
 
 
+def test_separate_lanes_do_not_impose_a_vertical_gap(tmp_path):
+    source = helpers.fixture(tmp_path, [("group.a", 200, 100, "rect"),
+                                       ("group.b", 100, 115, "rect"),
+                                       ("other.a", 400, 100, "rect"),
+                                       ("other.b", 400, 140, "rect")],
+                             [("group.a", "other.a", "M 212 103 L 388 103"),
+                              ("group.a", "other.b", "M 212 109 L 388 109")])
+    target = tmp_path / 'centered.svg'
+    report = center_by_alternatives(source, target, rules={'group': base.Rule('column')})
+    assert any(r['node'] == 'group.a' for r in report['applied'])
+    before, after = Diagram.load(source), Diagram.load(target)
+    assert before.nodes['group.b'].box == after.nodes['group.b'].box
+    assert [e.path.element.get('d') for e in before.edges] == [e.path.element.get('d') for e in after.edges]
+
+
 def test_lambda_single_moves_to_fixed_input_and_output_ports(tmp_path):
     source = ROOT / "tests/fixtures/lambda_single_unbalanced.svg"
     original = Diagram.load(source)

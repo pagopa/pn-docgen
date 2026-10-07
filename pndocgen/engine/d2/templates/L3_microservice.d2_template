@@ -39,7 +39,7 @@ classes: {
 
 {% for cluster_name, nodes in clusters.items() %}
 {% if nodes %}
-{{ cluster_name }}: "{{ cluster_name | title }}" {
+{{ cluster_name }}: "{{ queues_title if cluster_name == 'queues' and queues_title == 'Messaging & Streaming' else cluster_name | title }}" {
   class: boundary
   direction: down
 {% if cluster_name in generic_grids %}

@@ -94,6 +94,9 @@ def discover(args: Any, logger: Any = None) -> None:
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         with raw_path.open("x") as stream:
             json.dump({"version": 1, "component_resources": cfn.component_resources,
+                       "dataflow_links": cfn.dataflow_links,
+                       "dataflow_descriptions": cfn.dataflow_descriptions,
+                       "dataflow_scopes": sorted(cfn.dataflow_scopes),
                        "discovery_issues": cfn.issues}, stream, indent=2, default=str)
         nodes = cfn.to_inventory_nodes(
             account=account,

@@ -16,6 +16,7 @@ from pndocgen.engine.renderers.svg_capacity import fit_ports
 from pndocgen.engine.renderers.svg_node_labels import align_node_labels
 from pndocgen.engine.renderers.svg_titles import separate_container_titles
 from pndocgen.engine.renderers.svg_geometry import Diagram
+from pndocgen.engine.renderers.svg_node_clearance import separate_node_labels
 
 CONTRACT_PREFIX = "# pndocgen-layout: "
 
@@ -109,6 +110,21 @@ def normalize_layout(source: Path, destination: Path, contracts,
                     current, target, max_shift=settings.max_title_shift,
                     margin=settings.text_container_margin)
                 current = target
+            if settings.separate_node_labels:
+                target = staging / 'node-clearance.svg'
+                report['node_clearance'] = separate_node_labels(current, target,
+                    max_shift=settings.max_label_shift, max_node_shift=settings.max_shift,
+                    gap=settings.node_label_gap)
+                current = target
+                if report['node_clearance']['applied'] and (settings.center_singletons or settings.center_grouped_nodes):
+                    target = staging / 'centering-after-clearance.svg'
+                    report['centering_after_clearance'] = center_by_alternatives(
+                        current, target, max_node_shift=settings.max_node_shift,
+                        min_terminal=settings.min_terminal,
+                        rules=rules if settings.center_grouped_nodes else None,
+                        include_singletons=settings.center_singletons,
+                        allowed_clusters={name for name, rule in rules.items() if rule.layout != 'free'})
+                    current = target
         else:
             report["skipped"] = "disabled" if not settings.enabled else "no explicit layout metadata"
         with destination.open("xb") as handle:

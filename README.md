@@ -24,7 +24,7 @@ python scripts/download_aws_icons.py
 d2 --version
 ```
 
-The icon downloader uses an immutable upstream commit and verifies all 21
+The icon downloader uses an immutable upstream commit and verifies all registered
 SHA-256 hashes. Icons are downloaded only by that explicit setup command, not
 by diagram generation. Their artwork is separately licensed; preserve NOTICE.
 Install D2 0.7.1 from its official release for your platform, rather than relying
@@ -141,7 +141,7 @@ or silently regenerate old goldens. Public synthetic tests remain runnable
 without any of these private directories.
 
 Before distributing a wheel, verify its contents: package code, four templates,
-21 unchanged icons, icon NOTICE and project LICENSE; no captures/experiments.
+registered unchanged icons, icon NOTICE and project LICENSE; no captures/experiments.
 Build after downloading the verified icons. An installation without icons has
 a rectangle fallback, not the accepted AWS-icon visual style.
 The build helper checks every icon hash and requires a new output directory;

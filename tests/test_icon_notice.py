@@ -61,7 +61,7 @@ def test_frozen_icon_hashes_match_local_pngs() -> None:
     names = definitions["ICONS"]
     hashes = definitions["EXPECTED_SHA256"]
     assert set(names) == set(hashes)
-    assert len(names) == 21
+    assert {'aws-s3-tables', 'aws-firehose', 'aws-pipes'} <= set(names)
     for name in names:
         png = ICON_NOTICE.parent / f"{name}.png"
         assert hashlib.sha256(png.read_bytes()).hexdigest() == hashes[name]

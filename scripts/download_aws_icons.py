@@ -17,13 +17,16 @@ import sys
 import urllib.request
 from pathlib import Path
 
-# All 21 PNG hashes verified against this immutable upstream commit.
+# PNG hashes verified against this immutable upstream commit.
 UPSTREAM_REVISION = "e26e2c05daf8b6bc4c764669fc2be04c314ccb8c"
 BASE = f"https://raw.githubusercontent.com/awslabs/aws-icons-for-plantuml/{UPSTREAM_REVISION}/dist"
 
 # icon_name → (plantuml_category, plantuml_filename_without_extension)
 # File extension is always .png in the upstream repo.
 ICONS: dict[str, tuple[str, str]] = {
+    "aws-s3-tables":      ("Storage", "SimpleStorageServiceS3Tables"),
+    "aws-firehose":       ("Analytics", "DataFirehose"),
+    "aws-pipes":          ("ApplicationIntegration", "EventBridgePipes"),
     "aws-lambda":         ("Compute",                    "Lambda"),
     "aws-ecs":            ("Containers",                 "ElasticContainerService"),
     "aws-step-functions": ("ApplicationIntegration",     "StepFunctions"),
@@ -47,9 +50,12 @@ ICONS: dict[str, tuple[str, str]] = {
     "aws-cognito":        ("SecurityIdentityCompliance", "Cognito"),
 }
 
-# Frozen bytes of the 21 locally validated icons. Upstream `main` may move;
+# Frozen bytes of the locally validated icons. Upstream `main` may move;
 # downloading a different image must fail rather than silently change renders.
 EXPECTED_SHA256 = {
+    "aws-s3-tables": "8c6245d3da45607ec7a3ba8da27c4bb88bdf023ff34ebc257cd2c0c1cc129193",
+    "aws-firehose": "ccd991457870c3263f6b409a3284dfb657183eed05bd28e4cce2970abdf3a03e",
+    "aws-pipes": "33cec9d338731418b5ab14fdc8d55fd7c32b0d5b9703af7cfe16fe31e1456341",
     "aws-alb": "d9dd545eb3751975595194238fb9252072af8bb87a96b6fc3d5e2ccc031bb641",
     "aws-api-gateway": "c220cf32987bf162c2a6233589e7c39a259a45c33410b0bce0e7a4a8aa6e6eea",
     "aws-batch": "26f4e85aea11ce0778840d4126ab9a0663fc6d017613e1d00d9b1da5db7ba403",

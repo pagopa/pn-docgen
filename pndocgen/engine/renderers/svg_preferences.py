@@ -100,7 +100,7 @@ def _candidate(before, node_id, axis, delta, min_terminal=10.0):
     """Move one node and independently center each incident bundle around it.
 
     A bundle whose offset equals the node movement stays completely fixed.
-    An isolated port already on the moved node's center also stays fixed.
+    An isolated port still inside the moved node's side also stays fixed.
     Other bundles move using the existing terminal/elbow transformation.
     """
     diagram = _reload(_serialize(before), before.path)
@@ -118,9 +118,10 @@ def _candidate(before, node_id, axis, delta, min_terminal=10.0):
         if side in transverse_sides:
             point = edge.start if at_source else edge.end
             transverse = 1 if axis == "y" else 0
-            # A single straight port may already be on the proposed center.
-            # Its path then needs no elbow (or endpoint) adjustment.
-            if side not in spans and abs(point[transverse] - node.center[transverse]) <= EPS:
+            # Preserve a singleton's path if its attachment remains on the
+            # moved side. The shared gate verifies all endpoint attachments.
+            if (side not in spans and
+                    node.box[transverse] + EPS < point[transverse] < node.box[transverse] + node.box[transverse+2] - EPS):
                 continue
             movement = delta - spans.get(side, 0.0)
             if abs(movement) > EPS:
@@ -208,6 +209,14 @@ def center_by_alternatives(source: Path, destination: Path, *, max_node_shift=30
                     if [n.node_id for n in old_order] != [n.node_id for n in new_order]:
                         failure = "sibling order changed"
                     for a, b in zip(old_order, old_order[1:]):
+                        # Ragged columns can contain separate horizontal lanes.
+                        # A vertical gap floor applies only to siblings whose
+                        # transverse image spans overlap; the shared gate still
+                        # checks every label, route and node in all lanes.
+                        transverse = 1 - coordinate
+                        if (a.box[transverse] + a.box[transverse+2] <= b.box[transverse] or
+                                b.box[transverse] + b.box[transverse+2] <= a.box[transverse]):
+                            continue
                         old_gap = b.box[coordinate] - a.box[coordinate] - a.box[coordinate+2]
                         na, nb = candidate.nodes[a.node_id], candidate.nodes[b.node_id]
                         new_gap = nb.box[coordinate] - na.box[coordinate] - na.box[coordinate+2]

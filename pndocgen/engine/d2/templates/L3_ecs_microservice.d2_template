@@ -89,7 +89,7 @@ rules: "{{ rules_title }}" {
 
 {% if clusters.get("queues") %}
 # ── Queues (SQS + SNS + Kinesis) ─────────────────────────────────────────────
-queues: "SQS Queues" {
+queues: "{{ queues_title }}" {
   class: boundary
   style.fill: "{{ cluster_fills.get('queues', cluster_fills['default']) }}"
   grid-columns: {{ grid_columns.get("queues", 1) }}

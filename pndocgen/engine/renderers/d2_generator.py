@@ -67,6 +67,7 @@ _ICON_URL: dict[str, str | None] = {k: _local_icon(k) for k in [
     "aws-sqs", "aws-sns", "aws-kinesis", "aws-eventbridge",
     "aws-api-gateway", "aws-alb", "aws-nlb", "aws-cloudfront",
     "aws-waf", "aws-cognito",
+    "aws-s3-tables", "aws-firehose", "aws-pipes",
 ]}
 
 # Fallback: omit icon entirely when SVGs are not present (render still works, just no image).
@@ -315,6 +316,8 @@ class D2Generator:
                 safe = self._safe_id(node.name)
                 # Strip component name prefix from label for readability.
                 label = self._short_label(node.name, component.name)
+                if node.resource_type == 'aws_s3tables_tablebucket':
+                    label = 'S3 Tables · ' + label
                 node_dicts.append({
                     "id":            safe,
                     "label":         label,
@@ -448,8 +451,11 @@ class D2Generator:
             "data_edges":        data_edges,
             "box_edges":         box_edges,
             "cluster_fills":     self.cluster_fills,
+            "queues_title": ("Messaging & Streaming" if any(
+                node['resource_type'] in {'aws_kinesisfirehose_deliverystream', 'eventbridge_pipe'}
+                for node in clusters.get('queues', [])) else "SQS Queues"),
             "rules_title": ("EventBridge Triggers" if any(
-                node["resource_type"] == "aws_scheduler_schedule"
+                node["resource_type"] in {"aws_scheduler_schedule", "aws_events_eventbus", "eventbridge_bus"}
                 for node in clusters.get("rules", [])
             ) else "EventBridge Rules"),
         }

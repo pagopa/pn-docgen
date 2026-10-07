@@ -1,6 +1,18 @@
 """Explicit, opt-in exclusions from the rendered view, never from the inventory."""
 from dataclasses import dataclass, field
 
+PURPOSES = frozenset({'application', 'tracing', 'logging', 'test'})
+
+
+@dataclass(frozen=True)
+class PurposeRule:
+    resource_type: str
+    name_prefix: str
+    purpose: str
+
+    def matches(self, node):
+        return node.resource_type == self.resource_type and node.name.startswith(self.name_prefix)
+
 
 @dataclass(frozen=True)
 class Exclusion:
@@ -18,13 +30,28 @@ class ViewConfig:
     exclusions: list[Exclusion] = field(default_factory=list)
     edge_exclusions: list["EdgeExclusion"] = field(default_factory=list)
     excluded_clusters: list[str] = field(default_factory=lambda: ["security", "misc"])
+    excluded_purposes: list[str] = field(default_factory=lambda: ['logging', 'test'])
+    purpose_rules: list[PurposeRule] = field(default_factory=list)
 
     @classmethod
     def from_mapping(cls, value):
         if value is None:
             return cls()
-        if not isinstance(value, dict) or set(value) - {"exclusions", "edge_exclusions", "excluded_clusters"}:
-            raise ValueError("render.view accepts only exclusions, edge_exclusions and excluded_clusters")
+        if not isinstance(value, dict) or set(value) - {"exclusions", "edge_exclusions", "excluded_clusters", "excluded_purposes", "purpose_rules"}:
+            raise ValueError("Unknown render.view setting")
+        purposes = value.get('excluded_purposes', ['logging', 'test'])
+        if not isinstance(purposes, list) or any(not isinstance(v, str) or v not in PURPOSES for v in purposes):
+            raise ValueError('excluded_purposes accepts application, tracing, logging, test')
+        role_rules = value.get('purpose_rules', [])
+        if not isinstance(role_rules, list):
+            raise ValueError('purpose_rules must be a list')
+        roles = []
+        for rule in role_rules:
+            if (not isinstance(rule, dict) or set(rule) != {'resource_type', 'name_prefix', 'purpose'}
+                    or any(not isinstance(v, str) or not v.strip() or v != v.strip() for v in rule.values())
+                    or rule['purpose'] not in PURPOSES):
+                raise ValueError('purpose_rules require resource_type, name_prefix and a supported purpose')
+            roles.append(PurposeRule(**rule))
         clusters = value.get("excluded_clusters", ["security", "misc"])
         if (not isinstance(clusters, list)
                 or any(not isinstance(v, str) or not v.strip() or v != v.strip()
@@ -55,7 +82,8 @@ class ViewConfig:
             edges.append(EdgeExclusion(**rule))
         return cls(sorted(set(parsed), key=lambda r: (r.component, r.resource_type, r.name_prefix)),
                    sorted(set(edges), key=lambda r: (r.component, r.edge_type, r.source or "", r.target or "")),
-                   list(dict.fromkeys(clusters)))
+                   list(dict.fromkeys(clusters)), sorted(set(purposes)),
+                   sorted(set(roles), key=lambda r: (r.resource_type, r.name_prefix, r.purpose)))
 
 
 @dataclass(frozen=True)

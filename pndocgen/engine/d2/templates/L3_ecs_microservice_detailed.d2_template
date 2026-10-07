@@ -85,7 +85,7 @@ rules: "{{ rules_title }}" {
 {% endif %}
 
 {% if clusters.get("queues") %}
-queues: "SQS Queues" {
+queues: "{{ queues_title }}" {
   class: boundary
   style.fill: "{{ cluster_fills.get('queues', cluster_fills['default']) }}"
   width: 280

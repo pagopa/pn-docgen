@@ -257,7 +257,9 @@ keeps the `excluded_auxiliary_cluster` status for any excluded group.
 Schedules are trigger nodes in `rules` and remain visible. Authorizers are
 classified as `security` and omitted by the essential view. Neither placement
 implies an edge. Exclusion is a presentation choice, not proof that a resource
-has no runtime role: an unclassified EventBridge Pipe is omitted with `misc`.
+has no runtime role. Pipes, Firehose streams and EventBridge buses are classified
+as messaging; S3 Tables table buckets and tables are storage. Namespaces remain
+support objects. Classification does not invent missing relationships.
 When the specialized ECS template cannot represent a selected cluster, rendering
 uses the generic layout and records `layout_fallback` instead of hiding nodes.
 
@@ -265,7 +267,60 @@ Future CFN captures save a private `.raw.json` sidecar before normalization.
 It contains collected resource records and discovery issues, not every AWS API
 response. Normalized inventories remain filtered. Keep raw files out of public
 repositories; existing capture files are never overwritten.
+
+## Resource purposes and dataflow evidence
+
+S3 Tables is represented by one node per Table Bucket in both detail levels.
+Tables and namespaces stay in the inventory, not as separate visible nodes.
+Verified table_storage ownership projects table relationships to their bucket;
+containment is recorded in the view report rather than drawn as a dataflow.
+Missing or ambiguous ownership is reported as unresolved_table_bucket. Distinct
+buckets are never merged. Explicit resource and edge exclusions remain active.
+
+The essential view excludes `logging` and `test` purposes by default, independently
+of detail level. Application resources remain visible. A Firehose backup bucket
+is assigned `logging` only from its described backup relationship, not its name.
+A bucket also used as a primary delivery destination remains application storage.
+Tracing/test roles can be declared centrally without per-component exceptions:
+
+```yaml
+render:
+  view:
+    excluded_purposes: [logging, test]
+    purpose_rules:
+      - resource_type: aws_kinesisfirehose_deliverystream
+        name_prefix: tracing-
+        purpose: tracing
+```
+
+The supported purposes are `application`, `tracing`, `logging`, and `test`.
+Rules match the normalized resource type and name prefix, apply to every component,
+and override inferred purpose. Conflicting matches fail explicitly. Names in the
+example are illustrative, not built-in conventions. `excluded_purposes: []` enables
+operational details; `[logging, test, tracing]` also hides explicitly classified
+tracing resources. Other filters remain active. Reports record `excluded_purpose`
+and incident `excluded_endpoint` edges; the source graph is unchanged.
+
+Live enrichment uses read-only `pipes:DescribePipe` and
+`firehose:DescribeDeliveryStream` for resources already discovered through CFN,
+alongside existing EventBridge `ListTargetsByRule`. Supported typed targets include
+Kinesis, EventBridge buses, Firehose, SNS and Step Functions, in addition to the
+existing ECS/Lambda/SQS targets. Missing permissions, unsupported destinations and
+endpoints outside the captured component are discovery issues, not invented nodes.
+The raw sidecar additionally preserves dataflow descriptions, links and identity
+scopes. Older captures lack this evidence; replay cannot recover it retroactively.
+
 # Text-aware container fitting
+
+`render.normalization.separate_node_labels: true` enables bounded clearance of
+bottom resource labels after the other passes. It first tries moving an unattached
+icon and label together horizontally within the container (`max_node_shift`),
+then moving only the label downward (`max_label_shift`). Attached routes never
+move in this pass. Candidates must clear the affected label without introducing
+collisions, overflow or broken attachments; unsupported geometry abstains. Safe
+bundle centering is retried after a successful clearance. Set the flag to `false`
+to disable the pass. This is a guarded local correction, not a universal layout
+guarantee; an existing collision may remain when no safe candidate exists.
 
 `separate_container_titles: true` enables a final title-only pass. If a
 container title intersects a route or another measured object, the pass

@@ -283,6 +283,11 @@ class TagResolver:
         "lambda":           "lambdas",
         "dynamodb":         "dynamodb",
         "s3":               "storage",
+        "aws_s3tables_tablebucket": "storage",
+        "aws_s3tables_table": "storage",
+        "aws_kinesisfirehose_deliverystream": "queues",
+        "eventbridge_pipe": "queues",
+        "aws_events_eventbus": "rules",
         "sns":              "queues",      # SNS topics are input channels
         "kinesis":          "queues",      # Kinesis streams are input channels
         "step_function":    "lambdas",     # Step Functions are compute workers

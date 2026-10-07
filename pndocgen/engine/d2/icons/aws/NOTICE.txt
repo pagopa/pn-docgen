@@ -2,7 +2,7 @@ AWS Architecture Icons used by pn-docgen
 
 The PNG files in this directory are AWS Architecture Icons obtained from
 AWS Icons for PlantUML, https://github.com/awslabs/aws-icons-for-plantuml/tree/e26e2c05daf8b6bc4c764669fc2be04c314ccb8c/dist .
-All 21 PNG SHA-256 values were verified against this immutable revision.
+All PNG SHA-256 values are pinned to this immutable revision by the downloader.
 The upstream project identifies the icons (as distinct from its MIT-licensed
 code) as licensed under Creative Commons Attribution-NoDerivs 2.0 Generic:
 https://creativecommons.org/licenses/by-nd/2.0/ .
@@ -41,6 +41,9 @@ applicable notices and comply with the license for their distribution context;
 export tools may remove embedded metadata.
 
 The original icon titles and paths are:
+aws-s3-tables.png: Storage/SimpleStorageServiceS3Tables.png
+aws-firehose.png: Analytics/DataFirehose.png
+aws-pipes.png: ApplicationIntegration/EventBridgePipes.png
 aws-alb.png: NetworkingContentDelivery/ElasticLoadBalancingApplicationLoadBalancer.png
 aws-api-gateway.png: NetworkingContentDelivery/APIGateway.png
 aws-batch.png: Compute/Batch.png

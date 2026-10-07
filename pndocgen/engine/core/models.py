@@ -128,6 +128,12 @@ DEFAULT_RESOURCE_REGISTRY: dict[str, ResourceMeta] = {
     # --- Storage
     "dynamodb":                         _node(SemanticRole.STORAGE,   "aws-dynamodb"),
     "s3":                               _node(SemanticRole.STORAGE,   "aws-s3"),
+    "aws_s3tables_tablebucket":          _node(SemanticRole.STORAGE,   "aws-s3-tables"),
+    "aws_s3tables_table":                _node(SemanticRole.STORAGE,   "aws-s3-tables"),
+    "aws_s3tables_namespace":            _skip(),
+    "aws_kinesisfirehose_deliverystream": _node(SemanticRole.MESSAGING, "aws-firehose"),
+    "eventbridge_pipe":                 _node(SemanticRole.MESSAGING, "aws-pipes"),
+    "aws_events_eventbus":              _node(SemanticRole.MESSAGING, "aws-eventbridge"),
     "elasticache":                      _node(SemanticRole.STORAGE,   "aws-elasticache"),
     "rds":                              _node(SemanticRole.STORAGE,   "aws-rds"),
     "opensearch":                       _node(SemanticRole.STORAGE,   "aws-opensearch"),
