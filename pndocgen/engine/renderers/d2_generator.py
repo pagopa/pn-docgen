@@ -8,14 +8,44 @@ Supports L3 (microservice detail) diagrams.
 """
 
 import logging
+import re
+import json
+import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
-from pndocgen.engine.core.config import get_app_config
+from pndocgen.engine.core.config import VALID_RENDER_THEMES, get_app_config
 from pndocgen.engine.core.models import ComponentGraph, Component, get_resource_meta
+from pndocgen.engine.renderers.svg_normalizer import normalize_svg
+from pndocgen.engine.renderers.svg_layout import CONTRACT_PREFIX, read_contracts, normalize_layout
+from pndocgen.engine.renderers.ingress_layout import group_ingress
+from pndocgen.engine.renderers.view import prepare_view, account_rendered_edges
+from pndocgen.engine.renderers.assets import annotate_svg_icons, portable_icons
+from pndocgen.engine.renderers.svg_raster import raster_backend, rasterize_svg
+
+# Pinned D2 0.7.1 keywords, plus the parent-scope token. Keep resource IDs out
+# of the language namespace. Source: terrastruct/d2 v0.7.1 d2ast/keywords.go.
+_D2_RESERVED = frozenset('''
+label shape icon constraint tooltip link near width height direction top left
+grid-rows grid-columns grid-gap vertical-gap horizontal-gap class vars style
+source-arrowhead target-arrowhead classes opacity stroke fill fill-pattern
+stroke-width stroke-dash border-radius font font-size font-color bold italic
+underline text-transform shadow multiple double-border 3d animated filled
+layers scenarios steps _
+'''.split())
 
 logger = logging.getLogger(__name__)
+
+
+def _display_edge_label(edge, fallback: str = "") -> str:
+    """Use one visual term for SQS production without changing graph evidence."""
+    label = edge.label or fallback
+    if edge.edge_type == "sqs_producer" and label.casefold() == "sends":
+        return "produces"
+    return label
 
 
 # Icons directory bundled inside the package: pndocgen/engine/d2/icons/aws/
@@ -37,6 +67,7 @@ _ICON_URL: dict[str, str | None] = {k: _local_icon(k) for k in [
     "aws-sqs", "aws-sns", "aws-kinesis", "aws-eventbridge",
     "aws-api-gateway", "aws-alb", "aws-nlb", "aws-cloudfront",
     "aws-waf", "aws-cognito",
+    "aws-s3-tables", "aws-firehose", "aws-pipes",
 ]}
 
 # Fallback: omit icon entirely when SVGs are not present (render still works, just no image).
@@ -68,18 +99,45 @@ SIZE_MAP = {
     "misc":      (50, 50),
 }
 
-# Maps cluster name → D2 column path prefix used in the v74 template
-_V74_BOX_PATH: dict[str, str] = {
-    "apigw":         "col1.apigw",
-    "rules":         "col1.rules",
-    "queues":        "col2.queues",
-    "ecs":           "col3.ecs",
-    "lambdas":       "col3.lambdas",
-    "dynamodb":      "col4.dynamodb",
-    "storage":       "col4.storage",
-    "output_queues": "col4.output_queues",  # producer queues (ECS writes to)
-    "external":      "col5.external",
+_CLUSTER_FILL_KEYS: tuple[str, ...] = (
+    "apigw", "rules", "queues", "ecs", "lambdas", "dynamodb",
+    "storage", "output_queues", "external", "inputs", "compute",
+    "messaging", "security", "misc",
+)
+
+_PASTEL_CLUSTER_FILLS: dict[str, str] = {
+    "apigw": "#E3F2FD",
+    "rules": "#FFF3E0",
+    "queues": "#E3F2FD",
+    "ecs": "#E8F5E9",
+    "lambdas": "#F3E5F5",
+    "dynamodb": "#FCE4EC",
+    "storage": "#FCE4EC",
+    "output_queues": "#E3F2FD",
+    "external": "#FAFAFA",
+    "inputs": "#E3F2FD",
+    "compute": "#E8F5E9",
+    "messaging": "#FFF3E0",
+    "security": "#F3E5F5",
+    "misc": "#F5F5F5",
+    "default": "#F5F5F5",
 }
+
+_THEME_CLUSTER_FILLS: dict[str, dict[str, str]] = {
+    "white": {
+        **{cluster_name: "transparent" for cluster_name in _CLUSTER_FILL_KEYS},
+        "default": "transparent",
+    },
+    "pastel": _PASTEL_CLUSTER_FILLS,
+}
+
+_THEME_SERVICE_FILLS: dict[str, str] = {
+    "white": "transparent",
+    "pastel": "#E8EAF6",
+}
+
+# I cluster sono emessi al primo livello: il path D2 coincide con il nome del cluster.
+_V74_BOX_PATH: dict[str, str] = {}
 
 # Box-level edge color coding for v74 ecs_microservice layout
 # key: (src_cluster, dst_cluster) → (stroke_color, label, stroke_dash)
@@ -129,12 +187,30 @@ class D2Generator:
     is the single source of truth — no more duplicate ICON_MAP here.
     """
 
-    def __init__(self, templates_dir: Path):
+    def __init__(self, templates_dir: Path, render_theme: str = "white", normalization=None, ingress_layout=None):
+        normalized_theme = (render_theme or "white").strip().lower()
+        if normalized_theme not in VALID_RENDER_THEMES:
+            choices = ", ".join(sorted(VALID_RENDER_THEMES))
+            raise ValueError(
+                f"Unsupported render theme: {render_theme}. Use one of: {choices}."
+            )
+        self.render_theme = normalized_theme
+        self.cluster_fills = _THEME_CLUSTER_FILLS[normalized_theme]
+        self.service_fill = _THEME_SERVICE_FILLS[normalized_theme]
+        self.last_normalization_report = None
+        self.last_layout_report = None
+        self.normalization = normalization if normalization is not None else get_app_config().render.normalization
+        self.ingress_policy = get_app_config().render.ingress
+        self.ingress_override = ingress_layout
         self.env = Environment(
             loader=FileSystemLoader(str(templates_dir)),
             autoescape=select_autoescape([]),
             trim_blocks=True,
             lstrip_blocks=True,
+            # Generated identifiers are encoded separately; interpolated strings
+            # must not terminate D2 quotes or inject new declarations.
+            finalize=lambda value: json.dumps(value, ensure_ascii=False)[1:-1]
+            if isinstance(value, str) else value,
         )
 
     # Template selection map: pattern → template filename (simplified/default)
@@ -185,10 +261,33 @@ class D2Generator:
         Returns:
             Path to the generated .d2 file.
         """
-        # Resolve "auto" to the actual pattern by inspecting the component
+        report_path = output_path.with_suffix(".view.json")
+        if output_path.exists() or report_path.exists():
+            raise FileExistsError(f"Diagram or view report already exists: {output_path}")
+        app_config = get_app_config()
+        # Detect the architecture before applying view-only exclusions.
         resolved_pattern = pattern
         if pattern == "auto":
             resolved_pattern = self._detect_pattern(component)
+
+        component, edges, view_report = prepare_view(
+            component, edges or [], app_config.render.view,
+            app_config.edge_filter, self._safe_id,
+        )
+        self.last_view_report = view_report
+        supported = {"apigw", "rules", "queues", "ecs", "lambdas", "dynamodb",
+                     "storage", "output_queues", "external"}
+        extra = {name for name, cluster in component.clusters.items()
+                 if cluster.nodes and name not in supported}
+        if resolved_pattern == "ecs_microservice" and extra:
+            # Templates may change layout, never suppress selected nodes.
+            view_report["layout_fallback"] = {"from": resolved_pattern,
+                "to": "generic", "reason": "additional clusters", "clusters": sorted(extra)}
+            resolved_pattern = "lambda_microservice"
+        if getattr(self, "source_issues", None) is not None:
+            view_report["discovery_issues"] = self.source_issues
+            if self.source_issues:
+                logger.warning("Diagram source has %d discovery issue(s); see %s", len(self.source_issues), report_path)
 
         # Select template based on pattern + detail_level
         if detail_level == "detailed":
@@ -211,12 +310,14 @@ class D2Generator:
             width, height = SIZE_MAP.get(cluster_name, (50, 50))
             node_dicts = []
             for node in cluster.nodes:
-                meta = get_resource_meta(node.resource_type)
+                meta = get_resource_meta(node.resource_type, app_config.resource_kind_overrides)
                 resolved = _ICON_URL.get(meta.icon) if meta.icon else None
                 icon = resolved or _FALLBACK_ICON
                 safe = self._safe_id(node.name)
                 # Strip component name prefix from label for readability.
                 label = self._short_label(node.name, component.name)
+                if node.resource_type == 'aws_s3tables_tablebucket':
+                    label = 'S3 Tables · ' + label
                 node_dicts.append({
                     "id":            safe,
                     "label":         label,
@@ -315,10 +416,16 @@ class D2Generator:
                 structural_edges = []
                 data_edges = []
         else:
-            box_edges = []
-            structural_edges = self._build_structural_edges(resolved_pattern, clusters)
+            structural_edges = []
+            # Generic/Lambda simplified shares the ECS aggregation semantics
+            # across groups, but retains explicit intra-group relationships.
+            # No implicit self-loop is used to stand for hidden Lambda calls.
+            box_edges = self._build_box_edges(edges or [], node_lookup) if detail_level == 'simplified' else []
+            selected_node_edges = [e for e in (edges or [])
+                                   if detail_level != 'simplified'
+                                   or node_lookup[e.source][0] == node_lookup[e.target][0]]
             data_edges = self._build_data_edges(
-                edges or [], node_lookup, service_id, pattern=resolved_pattern
+                selected_node_edges, node_lookup, service_id, pattern=resolved_pattern
             )
 
         logger.debug(
@@ -327,22 +434,85 @@ class D2Generator:
             f"data: {len(data_edges)}"
         )
 
+        generic_grids = {}
+        if resolved_pattern != 'ecs_microservice' and detail_level == 'simplified':
+            intra_clusters = {node_lookup[e.source][0] for e in edges
+                              if node_lookup[e.source][0] == node_lookup[e.target][0]}
+            generic_grids = {name: self._grid_columns(len(nodes)) for name,nodes in clusters.items()
+                             if name not in intra_clusters}
         context = {
             "service_name":      component.name,
             "service_id":        service_id,
             "clusters":          clusters,
-            "alignment_edges":   self._build_alignment_edges(clusters),
+            "grid_columns":      {name: self._grid_columns(len(nodes)) for name, nodes in clusters.items()},
+            "generic_grids":     generic_grids,
+            "alignment_edges":   [],
             "structural_edges":  structural_edges,
             "data_edges":        data_edges,
             "box_edges":         box_edges,
+            "cluster_fills":     self.cluster_fills,
+            "queues_title": ("Messaging & Streaming" if any(
+                node['resource_type'] in {'aws_kinesisfirehose_deliverystream', 'eventbridge_pipe'}
+                for node in clusters.get('queues', [])) else "SQS Queues"),
+            "rules_title": ("EventBridge Triggers" if any(
+                node["resource_type"] in {"aws_scheduler_schedule", "aws_events_eventbus", "eventbridge_bus"}
+                for node in clusters.get("rules", [])
+            ) else "EventBridge Rules"),
         }
 
         d2_content = template.render(**context)
+        # Persist the generator's contract for subsequent, independent render calls.
+        # Only these clusters are emitted by ECS. Generic/Lambda templates emit
+        # all clusters and declare downward columns, with the same bounded gates.
+        emitted = {"apigw", "rules", "queues", "ecs", "lambdas", "dynamodb",
+                   "storage", "output_queues", "external"}
+        unsupported = set(clusters) - emitted if resolved_pattern == "ecs_microservice" else set()
+        if unsupported:
+            for resource in view_report["resources"]:
+                if resource["cluster"] in unsupported and resource["status"] == "included":
+                    resource.update(status="not_in_template", reason="cluster not supported by ECS template")
+            # An isolated unsupported resource was historically omitted. Preserve
+            # that view, but disclose it; never emit a misleading implicit node.
+            unsupported_names = {n.name for c, cluster in component.clusters.items()
+                                 if c in unsupported for n in cluster.nodes}
+            if any(e.source in unsupported_names or e.target in unsupported_names for e in edges):
+                raise ValueError(f"Edges reference clusters absent from ECS template: {sorted(unsupported)}")
+            logger.warning("ECS template omits clusters %s; see %s", sorted(unsupported), report_path)
+        contracts = {}
+        for name, nodes in sorted(clusters.items()):
+            if not nodes or (resolved_pattern == "ecs_microservice" and name not in emitted):
+                continue
+            columns = context["grid_columns"][name] if resolved_pattern == "ecs_microservice" and detail_level != "detailed" else 1
+            if name in generic_grids:
+                columns = generic_grids[name]
+            layout = "column" if columns == 1 else "grid"
+            contracts[name] = {"layout": layout, "columns": columns}
+        d2_content = CONTRACT_PREFIX + json.dumps(
+            {"version": 1, "clusters": contracts}, sort_keys=True, separators=(",", ":")
+        ) + "\n" + d2_content
+        ingress_mode, ingress_source = self.ingress_policy.resolve(component.name, self.ingress_override)
+        if resolved_pattern == "ecs_microservice" and detail_level == "detailed" and ingress_mode == "peers":
+            d2_content = group_ingress(d2_content)
+        logger.info("Ingress layout: mode=%s source=%s pattern=%s detail=%s",
+                    ingress_mode, ingress_source, resolved_pattern, detail_level)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(d2_content)
+        account_rendered_edges(view_report, node_lookup, resolved_pattern, detail_level,
+                               data_edges + box_edges)
+        d2_content = portable_icons(d2_content, output_path, _ICON_URL.values())
+        view_report.update(pattern=resolved_pattern, detail_level=detail_level,
+                           emitted_edge_count=len(data_edges) + len(box_edges))
+        # Exclusive creation protects prior output, including direct API calls.
+        with output_path.open("x") as stream:
+            stream.write(d2_content)
+        with report_path.open("x") as stream:
+            json.dump(view_report, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        skipped = sum("d2_endpoints" not in e for e in view_report["relationships"])
+        if skipped:
+            logger.warning("View omitted %d relationships; reasons: %s", skipped, report_path)
         logger.info(
             f"Generated D2: {output_path} "
-            f"(pattern={resolved_pattern}, detail={detail_level}, "
+            f"(pattern={resolved_pattern}, detail={detail_level}, theme={self.render_theme}, "
             f"{len(data_edges)} data edges, {len(structural_edges)} structural edges)"
         )
         return output_path
@@ -373,6 +543,23 @@ class D2Generator:
 
         # Component names present in the graph (used for cross-edge filtering)
         component_names: set[str] = set(graph.components.keys())
+        compute_owners: dict[str, set[str]] = {}
+        for comp_name, component in graph.components.items():
+            for cluster in component.clusters.values():
+                for node in cluster.nodes:
+                    if node.resource_type in {'ecs_service', 'lambda'}:
+                        compute_owners.setdefault(node.name, set()).add(comp_name)
+
+        def http_owner(endpoint):
+            owners = compute_owners.get(endpoint, set()) | (
+                {endpoint} if endpoint in component_names else set())
+            if len(owners) > 1:
+                raise ValueError(f'Ambiguous L2 endpoint: {endpoint}')
+            return next(iter(owners), None)
+
+        identifiers = [self._safe_id(name) for name in graph.components]
+        if len(set(identifiers)) != len(identifiers):
+            raise ValueError('D2 identifier collision between L2 components')
 
         # ── Build component node dicts ────────────────────────────────────────
         comp_dicts = []
@@ -394,19 +581,21 @@ class D2Generator:
         edge_dicts = []
         seen: set[tuple] = set()
         for edge in graph.edges:
-            # Only render edges where BOTH source AND target are known components.
-            # Intra-component edges (resource→resource within a component) are
-            # ignored at L2 — they belong to L3 diagrams.
-            if edge.source not in component_names or edge.target not in component_names:
+            # HTTP discovery may identify compute resources instead of components.
+            # Project only unique owners in this view; never rewrite the L3 graph.
+            source, target = edge.source, edge.target
+            if edge.edge_type == 'http_call':
+                source, target = http_owner(source), http_owner(target)
+            if source not in component_names or target not in component_names or source == target:
                 continue
-            key = (edge.source, edge.target, edge.edge_type)
+            key = (source, target, edge.edge_type)
             if key in seen:
                 continue
             seen.add(key)
             edge_dicts.append({
-                "from_id":  self._safe_id(edge.source),
-                "to_id":    self._safe_id(edge.target),
-                "label":    edge.label or edge.edge_type,
+                "from_id":  self._safe_id(source),
+                "to_id":    self._safe_id(target),
+                "label":    _display_edge_label(edge, edge.edge_type),
                 "edge_type": edge.edge_type,
                 "animated": edge.edge_type in _ANIMATED_EDGE_TYPES,
             })
@@ -415,6 +604,7 @@ class D2Generator:
             "title":      title,
             "components": comp_dicts,
             "edges":      edge_dicts,
+            "service_fill": self.service_fill,
         }
 
         d2_content = template.render(**context)
@@ -484,9 +674,11 @@ class D2Generator:
             for name, component in graph.components.items():
                 # Use the caller-supplied slug when available (single-component run),
                 # otherwise derive it from the component name.
-                file_prefix = component_prefix or self._safe_id(name)
+                file_prefix = (component_prefix if len(graph.components) == 1 else None) or self._safe_id(name)
                 detail_suffix = f"_L3_detailed" if detail_level != "simplified" else "_L3"
                 d2_path = output_dir / f"{file_prefix}_{ts}{detail_suffix}.d2"
+                if d2_path.exists():
+                    raise FileExistsError(f"Refusing to overwrite existing diagram: {d2_path}")
                 self.generate_l3(component, d2_path, edges=graph.edges, pattern=pattern, detail_level=detail_level)
                 generated.append(d2_path)
 
@@ -494,37 +686,94 @@ class D2Generator:
         if level in ("l2", "all") and len(graph.components) >= 2:
             map_prefix = component_prefix or "service_map"
             l2_path = output_dir / f"{map_prefix}_{ts}_L2.d2"
+            if l2_path.exists():
+                raise FileExistsError(f"Refusing to overwrite existing diagram: {l2_path}")
             self.generate_l2(graph, l2_path)
             generated.append(l2_path)
         elif level in ("l2", "all") and len(graph.components) < 2:
             logger.info("Skipping L2: need at least 2 components for a service map")
 
-        logger.info("Generated %d D2 files in %s", len(generated), output_dir)
+        logger.info(
+            "Generated %d D2 files in %s (theme=%s)",
+            len(generated),
+            output_dir,
+            self.render_theme,
+        )
         return generated
 
-    def render(self, d2_path: Path, fmt: str = "png") -> Path:
+    def render(self, d2_path: Path, fmt: str = "svg", *, timeout: float = 120.0) -> Path:
         """Render a ``.d2`` file to an image format via the D2 CLI.
 
         Supported formats:
         - ``png``
         - ``svg``
         """
-        fmt_norm = (fmt or "png").strip().lower()
+        fmt_norm = (fmt or "svg").strip().lower()
         if fmt_norm not in {"png", "svg"}:
             raise ValueError(f"Unsupported render format: {fmt}. Use 'png' or 'svg'.")
-
         output_path = d2_path.with_suffix(f".{fmt_norm}")
-        cmd = ["d2", "--layout=elk", str(d2_path), str(output_path)]
-        logger.info("Rendering (%s): %s", fmt_norm.upper(), " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error("d2 render failed: %s", result.stderr)
-            raise RuntimeError(f"d2 render failed for {d2_path}: {result.stderr}")
+        if output_path.exists():
+            raise FileExistsError(f"Refusing to overwrite existing render: {output_path}")
+        if fmt_norm == "png":
+            raster_backend()
+        binary = shutil.which("d2")
+        if binary is None:
+            raise RuntimeError("D2 executable not found on PATH; install D2 to render diagrams")
+        self.last_normalization_report = None
+        self.last_layout_report = None
+        contracts = read_contracts(d2_path)
+        with tempfile.TemporaryDirectory(prefix=".d2-render-", dir=output_path.parent) as staging:
+            temporary_output = Path(staging) / d2_path.with_suffix(".svg").name
+            cmd = [binary, "--layout=elk", str(d2_path), str(temporary_output)]
+            logger.info("Rendering canonical SVG: %s", " ".join(cmd))
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(f"D2 rendering timed out after {timeout:g}s: {d2_path}") from exc
+            if result.returncode != 0:
+                raise RuntimeError(f"d2 render failed for {d2_path}: {result.stderr}")
+            if not temporary_output.is_file():
+                raise RuntimeError(f"D2 returned success without producing SVG: {d2_path}")
+            self.last_normalization_report = normalize_svg(temporary_output)
+            report = self.last_normalization_report
+            logger.info("SVG normalization: resized=%d, aligned=%d, centered=%d, abstentions=%s, rollbacks=%s",
+                        report.resized, len(report.aligned), len(report.centered), report.skipped, report.rolled_back)
+            final_output = Path(staging) / "layout.svg"
+            self.last_layout_report = normalize_layout(
+                temporary_output, final_output, contracts, self.normalization)
+            logger.info("SVG explicit layout: %s", self.last_layout_report)
+            annotate_svg_icons(final_output)
+            temporary_output = final_output
+            canonical = d2_path.with_suffix(".svg")
+            if fmt_norm == "png":
+                if canonical.exists() and canonical.read_bytes() != final_output.read_bytes():
+                    raise FileExistsError(f"Existing SVG differs from this render: {canonical}")
+                temporary_output = rasterize_svg(final_output, Path(staging) / output_path.name)
+            # Publish complete artifacts without overwriting any existing file.
+            published = []
+            try:
+                if fmt_norm == "png" and not canonical.exists():
+                    os.link(final_output, canonical)
+                    published.append(canonical)
+                os.link(temporary_output, output_path)
+                published.append(output_path)
+            except OSError:
+                for path in reversed(published):
+                    path.unlink()
+                raise
         logger.info("Rendered %s: %s", fmt_norm.upper(), output_path)
         return output_path
 
+    @staticmethod
+    def _normalize_icon_sizes(svg_path: Path, size: float = 60.0) -> None:
+        """Uniforma le icone aws_node già posizionate da D2, mantenendone il centro.
+
+        Interviene solo su quattro attributi dell'immagine: non sposta nodi né archi.
+        """
+        normalize_svg(svg_path, sizes={"aws_node": size}, symmetry=False)
+
     def render_png(self, d2_path: Path) -> Path:
-        """Backward-compatible wrapper for PNG rendering."""
+        """Backward-compatible wrapper for PNG from the normalized SVG."""
         return self.render(d2_path, fmt="png")
 
     # ------------------------------------------------------------------
@@ -534,7 +783,12 @@ class D2Generator:
     @staticmethod
     def _safe_id(name: str) -> str:
         """Convert resource name to a valid D2 identifier (no hyphens/dots)."""
-        return name.replace("-", "_").replace(".", "_")
+        candidate = name.replace("-", "_").replace(".", "_")
+        if (re.fullmatch(r"[A-Za-z0-9_]+", candidate)
+                and candidate.lower() not in _D2_RESERVED
+                and not candidate.lower().startswith('resource_')):
+            return candidate
+        return "resource_" + name.encode("utf-8").hex()
 
     @staticmethod
     def _short_label(node_name: str, component_name: str) -> str:
@@ -596,17 +850,13 @@ class D2Generator:
         return None
 
     @staticmethod
-    def _build_alignment_edges(clusters: dict) -> list[tuple[str, str]]:
-        """
-        Build invisible alignment edges between cluster anchors to force
-        left-to-right ordering: inputs → messaging → compute → storage.
-        """
-        order = ["inputs", "messaging", "compute", "storage"]
-        present = [c for c in order if c in clusters and clusters[c]]
-        edges = []
-        for i in range(len(present) - 1):
-            edges.append((present[i], present[i + 1]))
-        return edges
+    def _grid_columns(children: int) -> int:
+        """Colonne della griglia in funzione dei figli (ricetta v6, esperimento 002)."""
+        if children >= 9:
+            return 3
+        if children >= 4:
+            return 2
+        return 1
 
     @staticmethod
     def _detect_pattern(component: "Component") -> str:
@@ -616,10 +866,10 @@ class D2Generator:
         Patterns:
           "ecs_microservice" — has an ECS service as primary compute unit,
                                surrounded by SQS inputs, Lambda workers, and DynamoDB.
-          "lambda_only"      — no ECS service, only Lambda functions.
+          "lambda_microservice" — no ECS service, at least one Lambda function.
           "generic"          — fallback for everything else.
 
-        The pattern drives _build_structural_edges() which tells ELK
+        The pattern drives the template selection and the cluster set.
         how to place clusters relative to each other.
         """
         all_types = {
@@ -629,80 +879,11 @@ class D2Generator:
         }
         has_ecs = "ecs_service" in all_types
         has_lambda = "lambda" in all_types
-        has_storage = bool(component.clusters.get("storage"))
-        has_inputs = bool(component.clusters.get("inputs")) or bool(component.clusters.get("messaging"))
-
         if has_ecs:
             return "ecs_microservice"
-        if has_lambda and (has_storage or has_inputs):
-            return "lambda_only"
+        if has_lambda:
+            return "lambda_microservice"
         return "generic"
-
-    @staticmethod
-    def _build_structural_edges(pattern: str, clusters: dict) -> list[dict]:
-        """
-        Build invisible ordering edges for ELK.
-
-        Returns:
-            list[dict]: Items with {from_path, to_path}.
-        """
-        result: list[dict] = []
-
-        # Per spostare la label verso l'inizio della freccia (lato source)
-        # con D2/ELK, usiamo un edge-label "fantasma" su un anchor point vicino
-        # alla sorgente. Questo evita di appoggiarsi alla piega ortogonale.
-        #
-        # Strategia:
-        #   1) edge reale: mantiene stile/linea, ma senza label
-        #   2) edge label-only: stessa direzione, opacità 0, con label.near
-        #      impostato a outside-left-center (supportato da D2), così il testo
-        #      resta più vicino all'origine del flusso.
-        label_anchor_uid = 0
-
-        if pattern != "ecs_microservice":
-            # ── Generic / lambda_only: cluster-level ordering hints ───────────
-            order = ["inputs", "messaging", "compute", "storage"]
-            present = [c for c in order if c in clusters and clusters[c]]
-            for i in range(len(present) - 1):
-                result.append({"from_path": present[i], "to_path": present[i + 1]})
-            return result
-
-        # ecs_microservice: workers are merged into compute.
-        # Use node-level invisible edges to stabilize layout ordering.
-
-        compute_nodes = clusters.get("compute", [])
-        if compute_nodes:
-            ecs_node_dict = next(
-                (n for n in compute_nodes if n.get("resource_type") == "ecs_service"),
-                compute_nodes[0],
-            )
-            ecs_id = ecs_node_dict["id"]
-            ecs_path = f"compute.{ecs_id}"
-
-            # inputs/messaging node → ECS node (invisible)
-            for cluster_name in ("inputs", "messaging"):
-                for node in clusters.get(cluster_name, []):
-                    result.append({
-                        "from_path": f"{cluster_name}.{node['id']}",
-                        "to_path":   ecs_path,
-                    })
-
-            # ECS node → storage (invisible)
-            for node in clusters.get("storage", []):
-                result.append({
-                    "from_path": ecs_path,
-                    "to_path":   f"storage.{node['id']}",
-                })
-
-            # ECS node → each worker lambda inside compute (invisible).
-            # Workers are merged into compute cluster, so their path is compute.{id}
-            for node in clusters.get("workers", []):
-                result.append({
-                    "from_path": ecs_path,
-                    "to_path":   f"compute.{node['id']}",
-                })
-
-        return result
 
     @staticmethod
     def _node_path(service_id: str, cluster: str, node_id: str, pattern: str = "auto") -> str:
@@ -755,6 +936,8 @@ class D2Generator:
                     break
 
         for edge in edges:
+            if not get_app_config().edge_filter.is_allowed(edge.edge_type):
+                continue
             src = node_lookup.get(edge.source)
             tgt = node_lookup.get(edge.target)
             if not (src and tgt):
@@ -784,7 +967,7 @@ class D2Generator:
                 result.append({
                     "from_path": src_path,
                     "to_path":   ecs_path,
-                    "label":     edge.label or "",
+                    "label":     _display_edge_label(edge),
                     "animated":  False,
                 })
                 result.append({
@@ -798,7 +981,7 @@ class D2Generator:
                 result.append({
                     "from_path": src_path,
                     "to_path":   tgt_path,
-                    "label":     edge.label or "",
+                    "label":     _display_edge_label(edge),
                     "animated":  edge.edge_type in _ANIMATED_EDGE_TYPES,
                 })
         return result
@@ -815,9 +998,8 @@ class D2Generator:
         intra-component edges into cluster-pair relationships and emits one
         styled arrow per unique (src_cluster, dst_cluster) pair.
 
-        The D2 path uses the v74 column structure:
-            col1.apigw, col1.rules, col2.queues, col3.ecs,
-            col3.lambdas, col4.dynamodb, col4.storage, col5.external
+        The D2 path is the cluster name itself:
+            apigw, rules, queues, ecs, lambdas, dynamodb, storage, external
 
         Color coding mirrors the golden_v74 reference:
             blue   (#1565C0) — integrations / consume
@@ -829,6 +1011,17 @@ class D2Generator:
         edge_filter = get_app_config().edge_filter
         seen: set[tuple[str, str]] = set()
         result: list[dict] = []
+
+        # Aggregate actual meanings, never infer read/write or trigger semantics
+        # merely from the pair of resource clusters.
+        labels_by_pair: dict[tuple[str, str], set[str]] = {}
+        for edge in edges:
+            if not edge_filter.is_allowed(edge.edge_type):
+                continue
+            src, dst = node_lookup.get(edge.source), node_lookup.get(edge.target)
+            if src and dst and src[0] != dst[0]:
+                labels_by_pair.setdefault((src[0], dst[0]), set()).add(
+                    _display_edge_label(edge, edge.edge_type or "related"))
 
         for edge in edges:
             # Apply edge type filter from pndocgen.yaml [edge_types] section
@@ -862,8 +1055,10 @@ class D2Generator:
                 stroke_color, label, stroke_dash = style
             else:
                 stroke_color = "#1565C0"
-                label = edge.label or edge.edge_type or ""
+                label = _display_edge_label(edge, edge.edge_type or "")
                 stroke_dash = False
+
+            label = "; ".join(sorted(labels_by_pair[key]))
 
             result.append({
                 "from_box":     src_box,
@@ -886,7 +1081,7 @@ class D2Generator:
 
         Unlike _build_box_edges (which aggregates to cluster level), this method
         emits one arrow per intra-component edge, with full D2 node paths:
-            col2.queues.{node_id} → col3.ecs.{node_id}
+            queues.{node_id} → ecs.{node_id}
 
         Color coding matches v65 golden reference:
             blue   (#1565C0) — SQS consumer / API GW integrations
@@ -919,6 +1114,7 @@ class D2Generator:
         }
 
         edge_filter = get_app_config().edge_filter
+        edges = [edge for edge in edges if edge_filter.is_allowed(edge.edge_type)]
         seen: set[tuple] = set()
         result: list[dict] = []
 
@@ -969,7 +1165,7 @@ class D2Generator:
             stroke_color = style[0] if style else "#1565C0"
             stroke_dash = style[1] if style else False
 
-            label = edge.label or ""
+            label = _display_edge_label(edge)
             if edge.edge_type == "sqs_consumer" and (edge.source, edge.target) in bidir_pairs:
                 label = "consumes/produces"
 

@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Callable, Any
 
 
+def _load_selected_config(args):
+    from pndocgen.engine.core.config import get_app_config
+    path = getattr(args, "config", None)
+    return get_app_config(Path(path) if path else None, force_reload=True)
+
+
 def build_discovery_strategy(args: Any, session: Any = None, logger: Any = None) -> Any:
     """Build a discovery strategy from CLI arguments.
 
@@ -60,8 +66,13 @@ def discover(args: Any, logger: Any = None) -> None:
     import boto3
     from pndocgen.sources.aws.discoverer import AWSDiscoverer, _extract_account_env
 
+    _load_selected_config(args)
     source = getattr(args, "discovery_source", "tag") or "tag"
     component = getattr(args, "component", None)
+    discovery_issues = None
+    raw_path = Path(args.output).with_suffix(".raw.json")
+    if Path(args.output).exists() or (source == "cfn" and raw_path.exists()):
+        raise FileExistsError(f"Refusing to overwrite discovery artifacts: {args.output}")
     session = boto3.Session(profile_name=args.profile, region_name=args.region)
     account, env = _extract_account_env(args.profile)
 
@@ -78,12 +89,22 @@ def discover(args: Any, logger: Any = None) -> None:
 
         cfn = CfnLiveDiscoverer(session, args.region)
         cfn.discover(component_filter=component)
+        # Private capture before lossy normalization: retained even if conversion
+        # fails. This is collected CFN state, not a dump of every AWS response.
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        with raw_path.open("x") as stream:
+            json.dump({"version": 1, "component_resources": cfn.component_resources,
+                       "dataflow_links": cfn.dataflow_links,
+                       "dataflow_descriptions": cfn.dataflow_descriptions,
+                       "dataflow_scopes": sorted(cfn.dataflow_scopes),
+                       "discovery_issues": cfn.issues}, stream, indent=2, default=str)
         nodes = cfn.to_inventory_nodes(
             account=account,
             region=args.region,
             skip_cfn_types=skip_cfn_types,
         )
         relationships = cfn.to_edges()
+        discovery_issues = cfn.issues
         if logger:
             logger.info(
                 "CFN-only mode: %d resources, %d relationships for component '%s' (skipping %d CFN types)",
@@ -134,10 +155,17 @@ def discover(args: Any, logger: Any = None) -> None:
         "relationships": relationships,
     }
 
+    if discovery_issues is not None:
+        output["discovery_issues"] = sorted(discovery_issues, key=lambda i: (i["stage"], i["resource"], i["error"]))
+        if discovery_issues:
+            print(f"WARNING: partial discovery ({len(discovery_issues)} issue(s)); see inventory discovery_issues")
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(output, indent=2, default=str))
+    with out_path.open("x") as stream:
+        json.dump(output, stream, indent=2, default=str)
     print(f"Inventory saved to {out_path} ({len(nodes)} resources)")
+    if component and not nodes:
+        raise ValueError(f"No resources discovered for explicit component {component!r}; check account, region and tags. Capture preserved.")
 
 
 def resolve(args: Any, logger: Any = None) -> None:
@@ -148,9 +176,14 @@ def resolve(args: Any, logger: Any = None) -> None:
     CFN repo analysis.
     """
     from pndocgen.engine.core.models import InventoryNode, Edge
-    from pndocgen.engine.core.config import load_pattern
+    from pndocgen.engine.core.config import get_app_config, load_pattern
     from pndocgen.engine.resolvers.tag_resolver import TagResolver
+    from pndocgen.engine.resolvers.resolve_report import resolution_report
 
+    out_path = Path(args.output)
+    report_path = out_path.with_suffix(".resolve.json")
+    if out_path.exists() or report_path.exists():
+        raise FileExistsError(f"Graph or resolution report already exists: {out_path}")
     inventory = json.loads(Path(args.inventory).read_text())
     nodes = [
         InventoryNode(
@@ -185,11 +218,14 @@ def resolve(args: Any, logger: Any = None) -> None:
 
         queue_cluster = "queues" if resolved_pattern in ("auto", "ecs_microservice") else "messaging"
         existing_names_by_component: dict[str, set[str]] = {}
+        compute_owners: dict[str, set[str]] = {}
         for comp_name, comp in graph.components.items():
             names: set[str] = set()
             for cluster in comp.clusters.values():
                 for node in cluster.nodes:
                     names.add(node.name)
+                    if node.resource_type in {"lambda", "ecs_service"}:
+                        compute_owners.setdefault(node.name, set()).add(comp_name)
             existing_names_by_component[comp_name] = names
 
         added = 0
@@ -205,6 +241,11 @@ def resolve(args: Any, logger: Any = None) -> None:
                 queue_name = rel.get("target", "")
                 component_name = rel.get("source", "")
 
+            if component_name not in graph.components:
+                owners = compute_owners.get(component_name, set())
+                if len(owners) > 1:
+                    raise ValueError(f"Ambiguous compute owner for SQS reference: {component_name}")
+                component_name = next(iter(owners), "")
             if not queue_name or component_name not in graph.components:
                 continue
             if (not include_dlq) and _is_dlq_name(queue_name):
@@ -256,6 +297,7 @@ def resolve(args: Any, logger: Any = None) -> None:
             target=rel["target"],
             edge_type=rel["type"],
             label=rel.get("label", ""),
+            evidence=rel.get("evidence", ""),
         )
         graph.add_edge(edge)
         rel_edges.append(edge)
@@ -264,10 +306,17 @@ def resolve(args: Any, logger: Any = None) -> None:
 
     resolver.reroute_sqs_triggers(graph, rel_edges)
 
+    static_scheduler_bindings = None
+    static_scheduler_sources = None
     if getattr(args, "repo_path", None):
         from pndocgen.sources.cfn.cfn_analyzer import CfnAnalyzer
+        from pndocgen.sources.cfn.scheduler import scan_schedule_bindings
 
         repo_path = Path(args.repo_path)
+        if not repo_path.exists():
+            raise FileNotFoundError(f"Repo path not found: {repo_path}")
+        if not repo_path.is_dir():
+            raise NotADirectoryError(f"Repo path is not a directory: {repo_path}")
         if repo_path.exists():
             analyzer = CfnAnalyzer(repo_path=repo_path)
             analysis = analyzer.analyze()
@@ -279,13 +328,93 @@ def resolve(args: Any, logger: Any = None) -> None:
             if logger:
                 logger.info("Enriched graph with CFN analysis for %s", comp_name)
 
+            static_scheduler_bindings = []
+            bindings, static_scheduler_sources = scan_schedule_bindings(
+                repo_path, get_app_config(config_path)
+            )
+            if logger:
+                issues = [source for source in static_scheduler_sources
+                          if source["status"] != "scanned"]
+                if issues:
+                    logger.warning("Static Scheduler scan has %d template issue(s); see resolve report",
+                                   len(issues))
+            schedule_counts = {}
+            for binding in bindings:
+                key = binding["schedule_logical_id"]
+                schedule_counts[key] = schedule_counts.get(key, 0) + 1
+            for binding in bindings:
+                record = dict(binding)
+                if schedule_counts[record["schedule_logical_id"]] != 1:
+                    record["status"] = "ambiguous_template_schedule"
+                elif record["status"] == "direct_getatt_lambda":
+                    schedule_nodes = [n for n in nodes
+                                      if n.metadata.get("component") == comp_name
+                                      and n.metadata.get("logical_id") == record["schedule_logical_id"]
+                                      and n.resource_type == "aws_scheduler_schedule"]
+                    target_nodes = [n for n in nodes
+                                    if n.metadata.get("component") == comp_name
+                                    and n.metadata.get("logical_id") == record["target_logical_id"]
+                                    and n.resource_type == "lambda"]
+                    if len(schedule_nodes) != 1:
+                        record["status"] = ("ambiguous_schedule" if schedule_nodes else "missing_schedule")
+                    elif len(target_nodes) != 1:
+                        record["status"] = ("ambiguous_target" if target_nodes else "missing_target")
+                    elif comp_name not in graph.components:
+                        record["status"] = "missing_component"
+                    else:
+                        schedule, target = schedule_nodes[0], target_nodes[0]
+                        component = graph.components[comp_name]
+                        schedule_cluster = next((cluster for cluster in component.clusters.values()
+                                                 if schedule in cluster.nodes), None)
+                        target_in_graph = any(target in cluster.nodes
+                                              for cluster in component.clusters.values())
+                        if schedule_cluster is None:
+                            record["status"] = "schedule_not_in_graph"
+                        elif not target_in_graph:
+                            record["status"] = "target_not_in_graph"
+                        else:
+                            if schedule_cluster.name != "rules":
+                                schedule_cluster.nodes.remove(schedule)
+                                component.add_node("rules", schedule)
+                            if any(e.source == schedule.name and e.target == target.name
+                                   and e.edge_type == "scheduler_trigger" for e in graph.edges):
+                                record["status"] = "already_in_graph"
+                            else:
+                                graph.add_edge(Edge(source=schedule.name, target=target.name,
+                                                    edge_type="scheduler_trigger", label="triggers",
+                                                    evidence="cfn_template_target_reference"))
+                                record["status"] = "resolved_into_graph"
+                static_scheduler_bindings.append(record)
+
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(graph.to_dict(), indent=2))
+    graph.canonicalize()
+    graph_output = graph.to_dict()
+    report = resolution_report(nodes, rels, graph, resolver)
+    if static_scheduler_bindings is not None:
+        report["static_scheduler_bindings"] = static_scheduler_bindings
+        report["static_scheduler_sources"] = static_scheduler_sources
+    if "discovery_issues" in inventory:
+        graph_output["discovery_issues"] = inventory["discovery_issues"]
+    with out_path.open("x") as stream:
+        json.dump(graph_output, stream, indent=2)
+    with report_path.open("x") as stream:
+        json.dump(report, stream, indent=2, sort_keys=True)
+        stream.write("\n")
     print(f"Component graph saved to {out_path}")
     print(f"   Components: {len(graph.components)}")
     print(f"   Edges:      {len(graph.edges)}")
     print(f"   Orphans:    {len(graph.orphans)}")
+
+
+def _resolve_render_theme(args: Any) -> str:
+    """Resolve the diagram theme with CLI > YAML > built-in default precedence."""
+    from pndocgen.engine.core.config import get_app_config
+
+    raw_config_path = getattr(args, "config", None)
+    config_path = Path(raw_config_path) if raw_config_path else None
+    app_config = get_app_config(config_path, force_reload=True)
+    return getattr(args, "theme", None) or app_config.render.theme
 
 
 def generate(args: Any, logger: Any = None) -> None:
@@ -303,7 +432,7 @@ def generate(args: Any, logger: Any = None) -> None:
 
     component_filter = getattr(args, "component", None)
     for comp_name, comp_data in graph_data["components"].items():
-        if component_filter and not comp_name.startswith(component_filter):
+        if component_filter and comp_name != component_filter:
             continue
 
         comp = Component(name=comp_name, account=comp_data.get("account", ""))
@@ -326,13 +455,20 @@ def generate(args: Any, logger: Any = None) -> None:
                 target=e["target"],
                 edge_type=e["type"],
                 label=e.get("label", ""),
+                evidence=e.get("evidence", ""),
             )
         )
     if graph.edges and logger:
         logger.info("Loaded %d edges from component graph", len(graph.edges))
 
+    # Rende il rendering indipendente dall'ordine con cui il graph.json è stato scritto.
+    graph.canonicalize()
+
     templates_dir = Path(__file__).parent.parent / "engine" / "d2" / "templates"
-    generator = D2Generator(templates_dir=templates_dir)
+    render_theme = _resolve_render_theme(args)
+    generator = D2Generator(templates_dir=templates_dir, render_theme=render_theme,
+                            ingress_layout=getattr(args, "ingress_layout", None))
+    generator.source_issues = graph_data.get("discovery_issues")
 
     output_dir = Path(args.output_dir)
     level = getattr(args, "level", "all") or "all"
@@ -350,18 +486,26 @@ def generate(args: Any, logger: Any = None) -> None:
         component_prefix=run_slug,
     )
 
-    render_format = getattr(args, "render_format", "png") or "png"
+    if not d2_files:
+        raise ValueError("No diagrams generated; check component selection, graph contents and level")
+    render_format = getattr(args, "render_format", "svg") or "svg"
 
+    render_failures = []
     if args.render:
         for d2_file in d2_files:
             try:
                 rendered = generator.render(d2_file, fmt=render_format)
                 print(f"  {render_format.upper()}: {rendered}")
-            except (RuntimeError, ValueError) as e:
+            except (RuntimeError, ValueError, OSError) as e:
                 print(f"  WARNING: {e}")
+                render_failures.append(str(e))
+
+    if render_failures:
+        raise RuntimeError(f"{len(render_failures)} render(s) failed: " + "; ".join(render_failures))
 
     print(f"Generated {len(d2_files)} diagrams in {output_dir}")
     print(f"   Level:      {level}")
+    print(f"   Theme:      {render_theme}")
     print(f"   Components: {len(graph.components)}")
     print(f"   Edges:      {len(graph.edges)}")
 
@@ -384,6 +528,7 @@ def run(
     if not discover_func or not resolve_func or not generate_func:
         raise ValueError("discover_func, resolve_func and generate_func are required")
 
+    _load_selected_config(args)
     ts = datetime.now().strftime("%Y%m%d%H%M")
     component = getattr(args, "component", None)
     component_slug = component.replace("-", "_") if component else "all"
@@ -394,6 +539,8 @@ def run(
 
     inventory_path = output_dir / f"{component_slug}_{ts}_inventory.json"
     graph_path = output_dir / f"{component_slug}_{ts}_graph.json"
+    if inventory_path.exists() or graph_path.exists():
+        raise FileExistsError(f"Snapshot already exists for {component_slug}_{ts}; use a new output directory")
 
     if getattr(args, "repo_path", None) and analyze_func:
         analysis_path = output_dir / f"{component_slug}_{ts}_analysis.json"
