@@ -293,9 +293,10 @@ class CfnLiveDiscoverer:
         self.lambda_sqs_triggers: list[dict] = []
         self.lambda_sqs_consumers: dict[str, list[str]] = {}
         self.lambda_sqs_producers: dict[str, list[str]] = {}
-        # ECS HTTP client edges: component -> [target_component]
+        # ECS HTTP client edges: service ARN -> [target_component]. Legacy
+        # component keys remain supported only for uniquely owned ECS services.
         self.ecs_http_clients: dict[str, list[str]] = {}
-        # ECS SQS consumer edges: component -> [queue_name]
+        # ECS SQS consumer edges: service ARN -> [queue_name]
         # Populated by _enrich_ecs_env_vars() by scanning env var VALUES for SQS URLs.
         # ECS polls queues via application code (no AWS EventSourceMapping),
         # so the only discovery path is via task definition environment variables.
@@ -318,10 +319,10 @@ class CfnLiveDiscoverer:
         # List of {"apigw_name": ..., "lambda_name": ...}
         self.apigw_lambda_edges: list[dict] = []
         # ECS task role IAM scan → storage access edges (DynamoDB/S3)
-        # Maps ecs_component_name → list of storage resource names
+        # Maps service ARN → list of storage resource names
         self.ecs_storage_access: dict[str, list[str]] = {}
         # Storage access mode per ECS/resource inferred from IAM actions.
-        # ecs_component_name -> resource_name -> {"read", "write"}
+        # service ARN -> resource_name -> {"read", "write"}
         self.ecs_storage_modes: dict[str, dict[str, set[str]]] = {}
         # EventBridge Rules → ECS edges (from events:ListTargetsByRule)
         # List of {"rule_name": ..., "ecs_component": ..., "component": ...}
@@ -339,7 +340,7 @@ class CfnLiveDiscoverer:
         # List of {"lambda_arn": ..., "table_arn": ..., "component": ...}
         self.lambda_dynamodb_triggers: list[dict] = []
         self.lambda_kinesis_triggers: list[dict] = []
-        # ECS SQS producer edges (sqs:SendMessage IAM actions) — component → [queue_name]
+        # ECS SQS producer edges (sqs:SendMessage IAM actions): service ARN -> queues
         self.ecs_sqs_producers: dict[str, list[str]] = {}
         # SNS fan-out edges: SNS topic → SQS queue / Lambda function
         # List of {"source_topic": ..., "target": ..., "target_type": "sqs"|"lambda"}
@@ -366,11 +367,41 @@ class CfnLiveDiscoverer:
         return next(iter(names), identifier)
 
     def _ecs_endpoint(self, component: str) -> str:
-        """Resolve a component-level inference only when its ECS owner is unique."""
+        """Resolve exact service identities; keep legacy component inference guarded."""
+        if component.startswith("arn:"):
+            identifier = component
+            names = self._resource_aliases.get(("AWS::ECS::Service", identifier), set())
+            if len(names) == 1:
+                return next(iter(names))
+            # Some legacy callers serialize before converting inventory nodes.
+            component = self.resource_map.get(identifier, "")
+            if not component or len(self._ecs_identities(component)) != 1:
+                raise ValueError(f"Unresolved ECS service identity: {identifier}")
         names = self._ecs_component_names.get(component, set())
-        if len(names) > 1:
+        if len(names) > 1 or (not names and len(self._ecs_identities(component)) > 1):
             raise ValueError(f"Ambiguous ECS owner in {component}: {sorted(names)}")
         return next(iter(names), component)
+
+    def _ecs_identities(self, component: str) -> set[str]:
+        return {r["physical_id"] for r in self.component_resources.get(component, [])
+                if r.get("type") == "AWS::ECS::Service" and r.get("physical_id")}
+
+    def _multi_ecs_names(self, component: str) -> dict[str, str]:
+        """Keep real service names, qualified by cluster when necessary.
+
+        Repeated nested-stack logical IDs are not identities. No order-based
+        suffixes or deployment-specific name parsing. Names are stable for a
+        given capture, not necessarily across resource replacements.
+        """
+        identities = self._ecs_identities(component)
+        if len(identities) < 2:
+            return {}
+        names = {pid: pid.rsplit("/", 1)[-1] for pid in identities}
+        if len(set(names.values())) != len(names):
+            names = {pid: pid.split(":service/", 1)[-1] for pid in identities}
+        if len(set(names.values())) != len(names):
+            names = {pid: pid for pid in identities}
+        return names
 
     def discover(self, component_filter: Optional[str] = None) -> None:
         """
@@ -456,6 +487,11 @@ class CfnLiveDiscoverer:
         seen_names: dict[tuple[str, str], tuple[str, str]] = {}
         nodes = []
         for component, resources in self.component_resources.items():
+            from pndocgen.sources.aws.cfn_provenance import logical_paths
+            provenance, provenance_issues = logical_paths(resources)
+            for issue in provenance_issues:
+                self._record_issue('ambiguous_cfn_provenance', issue['resource'], issue['reason'])
+            multi_ecs_names = self._multi_ecs_names(component)
             for res in resources:
                 physical_id = res["physical_id"]
                 cfn_type = res.get("type", "")
@@ -487,8 +523,11 @@ class CfnLiveDiscoverer:
                 # (e.g. "pn-delivery-microsvc-dev-DeliveryMicroservice-XYZ-ECSService-ABC").
                 # Replace with the component name, which is the human-readable service name
                 # (e.g. "pn-delivery").
-                if cfn_type == "AWS::ECS::Service" and "-ECSService-" in name:
-                    name = component
+                if cfn_type == "AWS::ECS::Service":
+                    if multi_ecs_names:
+                        name = multi_ecs_names[physical_id]
+                    elif "-ECSService-" in name:
+                        name = component
 
                 # Any resource whose normalized name still contains an env-stage token
                 # (e.g. "-dev-", "-prod-") is still opaque / CFN-generated.
@@ -496,7 +535,8 @@ class CfnLiveDiscoverer:
                 # This covers SQS queues, EventBridge rules/pipes, and any other resource
                 # type where _normalize_name didn't fully clean the physical_id.
                 env_tokens = ("-dev-", "-prod-", "-staging-", "-uat-")
-                if logical_id and (cfn_type == "AWS::Pipes::Pipe" or any(tok in name for tok in env_tokens)):
+                if (logical_id and not (cfn_type == "AWS::ECS::Service" and multi_ecs_names)
+                        and (cfn_type == "AWS::Pipes::Pipe" or any(tok in name for tok in env_tokens))):
                     import re as _re2
                     # Convert PascalCase logical_id → kebab-case
                     # e.g. "PnDeliveryLimitConfigurerQueue" → "pn-delivery-limit-configurer-queue"
@@ -530,6 +570,8 @@ class CfnLiveDiscoverer:
                         "component": component,
                         "logical_id": logical_id,
                         "cfn_type": cfn_type,
+                        **({'cfn_provenance': 'stack_membership_v1',
+                            'cfn_logical_path': provenance[identity]} if identity in provenance else {}),
                     }
                 ))
 
@@ -854,6 +896,7 @@ class CfnLiveDiscoverer:
                         "physical_id": physical_id,
                         "logical_id": logical_id,
                         "type": res_type,
+                        "stack_name": stack_name,
                     })
 
                     # Recurse into nested stacks (ARN or name)
@@ -1053,6 +1096,10 @@ class CfnLiveDiscoverer:
                 owned_buckets = component_buckets_by_name.get(component, set())
 
                 for svc in resp.get("services", []):
+                    if svc.get("serviceArn", svc_arn) != svc_arn:
+                        self._record_issue("ecs_service_identity", svc_arn,
+                                           "DescribeServices returned a different service ARN")
+                        continue
                     td_arn = svc.get("taskDefinition", "")
                     if not td_arn:
                         continue
@@ -1083,7 +1130,7 @@ class CfnLiveDiscoverer:
                                 and not env_value.startswith("arn:")
                             ):
                                 norm_name = component_known[env_value]
-                                self._register_ecs_storage_access(component, norm_name, None)
+                                self._register_ecs_storage_access(svc_arn, norm_name, None)
                                 logger.debug(
                                     "[cfn-live] ECS storage (env value match): %s -> %s (from %s=%s)",
                                     component,
@@ -1093,8 +1140,8 @@ class CfnLiveDiscoverer:
                                 )
 
                     if http_clients:
-                        self.ecs_http_clients.setdefault(component, [])
-                        self.ecs_http_clients[component].extend(http_clients)
+                        self.ecs_http_clients.setdefault(svc_arn, [])
+                        self.ecs_http_clients[svc_arn].extend(http_clients)
 
                     # 2. Task role IAM policies -> SQS and storage edges
                     task_role_arn = td.get("taskRoleArn", "")
@@ -1181,7 +1228,7 @@ class CfnLiveDiscoverer:
                                 if res_arn == "*":
                                     if dynamo_modes:
                                         for table_name in owned_tables:
-                                            self._register_ecs_storage_access(component, table_name, dynamo_modes)
+                                            self._register_ecs_storage_access(svc_arn, table_name, dynamo_modes)
                                             logger.debug(
                                                 "[cfn-live] ECS DynamoDB (wildcard IAM): %s -> %s [%s]",
                                                 component,
@@ -1190,7 +1237,7 @@ class CfnLiveDiscoverer:
                                             )
                                     if s3_modes:
                                         for bucket_name in owned_buckets:
-                                            self._register_ecs_storage_access(component, bucket_name, s3_modes)
+                                            self._register_ecs_storage_access(svc_arn, bucket_name, s3_modes)
                                             logger.debug(
                                                 "[cfn-live] ECS S3 (wildcard IAM): %s -> %s [%s]",
                                                 component,
@@ -1204,12 +1251,12 @@ class CfnLiveDiscoverer:
                                     if not queue_name or queue_name == "*":
                                         continue
                                     if is_consumer:
-                                        self.ecs_sqs_consumers.setdefault(component, [])
-                                        self.ecs_sqs_consumers[component].append(queue_name)
+                                        self.ecs_sqs_consumers.setdefault(svc_arn, [])
+                                        self.ecs_sqs_consumers[svc_arn].append(queue_name)
                                         logger.debug("[cfn-live] ECS SQS consumer: %s <- %s", component, queue_name)
                                     if is_producer:
-                                        self.ecs_sqs_producers.setdefault(component, [])
-                                        self.ecs_sqs_producers[component].append(queue_name)
+                                        self.ecs_sqs_producers.setdefault(svc_arn, [])
+                                        self.ecs_sqs_producers[svc_arn].append(queue_name)
                                         logger.debug("[cfn-live] ECS SQS producer: %s -> %s", component, queue_name)
                                     continue
 
@@ -1221,7 +1268,7 @@ class CfnLiveDiscoverer:
                                     if not norm_name or norm_name not in owned_tables:
                                         # Keep scope to tables created by the same microservice storage stack.
                                         continue
-                                    self._register_ecs_storage_access(component, norm_name, dynamo_modes)
+                                    self._register_ecs_storage_access(svc_arn, norm_name, dynamo_modes)
                                     logger.debug(
                                         "[cfn-live] ECS DynamoDB access: %s -> %s [%s]",
                                         component,
@@ -1237,7 +1284,7 @@ class CfnLiveDiscoverer:
                                     norm_name = component_known.get(bucket_name)
                                     if not norm_name or norm_name not in owned_buckets:
                                         continue
-                                    self._register_ecs_storage_access(component, norm_name, s3_modes)
+                                    self._register_ecs_storage_access(svc_arn, norm_name, s3_modes)
                                     logger.debug(
                                         "[cfn-live] ECS S3 access: %s -> %s [%s]",
                                         component,
@@ -1686,22 +1733,10 @@ class CfnLiveDiscoverer:
             logger.debug("[cfn-live] No EventBridge rules found, skipping EB enrichment")
             return
 
-        # Build ECS component lookup: cluster+service → component_name
-        ecs_components: dict[str, str] = {}
-        for component, resources in self.component_resources.items():
-            for res in resources:
-                if res.get("type") == "AWS::ECS::Service":
-                    ecs_components[component] = component
-                    pid = res.get("physical_id", "")
-                    if pid:
-                        ecs_components[pid] = component
-
-        # Also use resource_map which has ECS service ARNs
-        for arn, comp in self.resource_map.items():
-            if ":service/" in arn:
-                ecs_components[arn] = comp
-                svc_name = arn.split("/")[-1]
-                ecs_components[svc_name] = comp
+        # Never infer a service from a substring of a cluster/component name.
+        # ECS RunTask targets describe tasks, not an ECS Service owner.
+        ecs_services = {pid for component in self.component_resources
+                        for pid in self._ecs_identities(component)}
 
         seen: set[tuple[str, str]] = set()
         for entry in rule_entries:
@@ -1721,23 +1756,15 @@ class CfnLiveDiscoverer:
                     target_arn = target.get("Arn", "")
 
                     if ":ecs:" in target_arn:
-                        # EventBridge → ECS
-                        for ecs_key, ecs_comp in ecs_components.items():
-                            if ecs_key in target_arn or target_arn.endswith(ecs_key):
-                                edge_key = (rule_display_name, ecs_comp)
-                                if edge_key not in seen:
-                                    seen.add(edge_key)
-                                    self.eventbridge_ecs_edges.append({
-                                        "rule_name": rule_display_name,
-                                        "ecs_component": ecs_comp,
-                                        "component": rule_component,
-                                    })
-                                    logger.debug(
-                                        "[cfn-live] EventBridge->ECS: %s -> %s",
-                                        rule_display_name,
-                                        ecs_comp,
-                                    )
-                                break
+                        if target_arn in ecs_services and not target.get("EcsParameters"):
+                            edge_key = (rule_display_name, target_arn)
+                            if edge_key not in seen:
+                                seen.add(edge_key)
+                                self.eventbridge_ecs_edges.append({
+                                    "rule_name": rule_display_name,
+                                    "ecs_component": target_arn,
+                                    "component": rule_component,
+                                })
                         else:
                             self._record_issue('unresolved_eventbridge_ecs_target', entry['physical_id'], target_arn)
 
@@ -1903,6 +1930,12 @@ class CfnLiveDiscoverer:
                     has_ecs = True
 
             if not apigw_entries or not has_ecs:
+                continue
+
+            if len(self._ecs_identities(component)) > 1:
+                for apigw_name in sorted(set(apigw_entries)):
+                    self._record_issue("ambiguous_apigw_ecs_owner", apigw_name,
+                                       f"Multiple ECS services in {component}; no verified integration binding")
                 continue
 
             # Co-location heuristic, not a proven integration chain. Preserve its

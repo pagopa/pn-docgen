@@ -77,6 +77,14 @@ the empty capture for diagnosis. Generation producing no diagrams also fails.
 source evidence, not proof that the local revision is deployed. Review the
 source hashes and unresolved bindings in the resolve report.
 
+For a saved inventory, add `--repo-path /path/to/component-repository` to
+`resolve` to enable the same static enrichment. Explicit Scheduler-to-Lambda
+references are matched by unique logical IDs, not similar resource names.
+An empty `discovery_issues` list is not a completeness guarantee: unsupported
+database endpoints, arbitrary HTTP/ALB routing and external storage references
+may remain unconnected. A disconnected icon does not prove that a resource is
+unused.
+
 ## Configuration and visibility
 
 One central YAML can serve all component repositories; repository-local files
@@ -116,7 +124,15 @@ Relationships may describe IAM permissions, configuration bindings, environment
 references or same-component heuristics. They are **not observed traffic**.
 Evidence is available where known; historical and some static relationships
 may have no evidence. Omitted external endpoints are reported, not fabricated.
-More than one possible ECS owner causes an explicit ambiguity error.
+Multiple ECS services retain distinct identities and service-specific
+relationships. Component-only relationships with more than one possible ECS
+owner are rejected or reported rather than assigned arbitrarily.
+
+New CFN captures retain verified logical ancestry for readable display labels.
+The shortest distinct logical suffix is used, with additional ancestor context
+on collisions. IDs and relationship endpoints do not change. Missing or
+ambiguous provenance keeps technical labels; older captures remain compatible.
+Display labels are not a privacy filter for live-derived output.
 
 Keep live-derived captures, reports and images private. `.gitignore` is a guard,
 not a sanitizer: never force-add live artifacts or publish them automatically.

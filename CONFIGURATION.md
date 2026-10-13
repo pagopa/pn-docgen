@@ -314,13 +314,19 @@ scopes. Older captures lack this evidence; replay cannot recover it retroactivel
 
 `render.normalization.separate_node_labels: true` enables bounded clearance of
 bottom resource labels after the other passes. It first tries moving an unattached
-icon and label together horizontally within the container (`max_node_shift`),
-then moving only the label downward (`max_label_shift`). Attached routes never
-move in this pass. Candidates must clear the affected label without introducing
+icon and label together horizontally within the container (`max_shift`),
+then moving only the label downward (`max_label_shift`). As a last resort, an
+already aligned sibling column may move horizontally as a unit within
+`max_shift`, preserving centered labels and sibling alignment. This uses
+the existing endpoint adjustments and honors `min_terminal`; it does not invent
+routes or relationships. Candidates must clear the affected label without introducing
 collisions, overflow or broken attachments; unsupported geometry abstains. Safe
 bundle centering is retried after a successful clearance. Set the flag to `false`
 to disable the pass. This is a guarded local correction, not a universal layout
 guarantee; an existing collision may remain when no safe candidate exists.
+
+The column fallback does not resize the canvas, containers or icons and must
+not worsen bundle centering or introduce measured text/geometry conflicts.
 
 `separate_container_titles: true` enables a final title-only pass. If a
 container title intersects a route or another measured object, the pass

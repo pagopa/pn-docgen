@@ -114,7 +114,7 @@ def normalize_layout(source: Path, destination: Path, contracts,
                 target = staging / 'node-clearance.svg'
                 report['node_clearance'] = separate_node_labels(current, target,
                     max_shift=settings.max_label_shift, max_node_shift=settings.max_shift,
-                    gap=settings.node_label_gap)
+                    gap=settings.node_label_gap, min_terminal=settings.min_terminal)
                 current = target
                 if report['node_clearance']['applied'] and (settings.center_singletons or settings.center_grouped_nodes):
                     target = staging / 'centering-after-clearance.svg'

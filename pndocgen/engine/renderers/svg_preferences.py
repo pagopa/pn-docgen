@@ -96,7 +96,7 @@ def _side(node, edge, at_source):
     return None
 
 
-def _candidate(before, node_id, axis, delta, min_terminal=10.0):
+def _candidate(before, node_id, axis, delta, min_terminal=10.0, *, require_centering=True):
     """Move one node and independently center each incident bundle around it.
 
     A bundle whose offset equals the node movement stays completely fixed.
@@ -135,7 +135,7 @@ def _candidate(before, node_id, axis, delta, min_terminal=10.0):
         return None, failure
     old = base._port_offsets(before)
     new = base._port_offsets(diagram)
-    if not any(new.get(k, v) + EPS < v for k, v in old.items() if k[0] == node_id):
+    if require_centering and not any(new.get(k, v) + EPS < v for k, v in old.items() if k[0] == node_id):
         return None, "no measurable centering improvement"
     return diagram, None
 

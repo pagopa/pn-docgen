@@ -25,6 +25,7 @@ from pndocgen.engine.renderers.ingress_layout import group_ingress
 from pndocgen.engine.renderers.view import prepare_view, account_rendered_edges
 from pndocgen.engine.renderers.assets import annotate_svg_icons, portable_icons
 from pndocgen.engine.renderers.svg_raster import raster_backend, rasterize_svg
+from pndocgen.engine.renderers.node_labels import choose_labels
 
 # Pinned D2 0.7.1 keywords, plus the parent-scope token. Keep resource IDs out
 # of the language namespace. Source: terrastruct/d2 v0.7.1 d2ast/keywords.go.
@@ -306,6 +307,13 @@ class D2Generator:
         # node_lookup: name → (cluster_name, safe_id) — used for edge resolution
         node_lookup: dict[str, tuple[str, str]] = {}
 
+        visible_nodes = [node for cluster in component.clusters.values() for node in cluster.nodes]
+        display_labels, label_decisions = choose_labels(visible_nodes, {
+            node.name: self._short_label(node.name, component.name) for node in visible_nodes}, {
+            node.name: 'S3 Tables · ' for node in visible_nodes if node.resource_type == 'aws_s3tables_tablebucket'})
+        if label_decisions:
+            view_report['display_labels'] = label_decisions
+
         for cluster_name, cluster in component.clusters.items():
             width, height = SIZE_MAP.get(cluster_name, (50, 50))
             node_dicts = []
@@ -315,9 +323,7 @@ class D2Generator:
                 icon = resolved or _FALLBACK_ICON
                 safe = self._safe_id(node.name)
                 # Strip component name prefix from label for readability.
-                label = self._short_label(node.name, component.name)
-                if node.resource_type == 'aws_s3tables_tablebucket':
-                    label = 'S3 Tables · ' + label
+                label = display_labels[node.name]
                 node_dicts.append({
                     "id":            safe,
                     "label":         label,

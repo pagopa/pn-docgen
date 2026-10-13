@@ -424,6 +424,7 @@ def generate(args: Any, logger: Any = None) -> None:
         Component,
         ComponentGraph,
         Edge,
+        label_metadata,
     )
     from pndocgen.engine.renderers.d2_generator import D2Generator
 
@@ -444,6 +445,7 @@ def generate(args: Any, logger: Any = None) -> None:
                     resource_type=n["type"],
                     account=comp_data.get("account", ""),
                     region="",
+                    metadata=label_metadata(n.get('metadata', {})),
                 )
                 comp.add_node(cluster_name, node)
         graph.add_component(comp)

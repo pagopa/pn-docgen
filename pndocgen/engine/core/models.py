@@ -383,7 +383,8 @@ class Component:
             "account": self.account,
             "clusters": {
                 cluster_name: [
-                    {"id": n.id, "name": n.name, "type": n.resource_type}
+                    {"id": n.id, "name": n.name, "type": n.resource_type,
+                     **({'metadata': label_metadata(n.metadata)} if label_metadata(n.metadata) else {})}
                     for n in cluster.nodes
                 ]
                 for cluster_name, cluster in self.clusters.items()
@@ -392,6 +393,18 @@ class Component:
         if self.analysis:
             result["analysis"] = self.analysis.to_dict()
         return result
+
+
+def label_metadata(metadata: dict) -> dict:
+    """Preserve only the versioned display provenance across graph JSON.
+
+    Do not serialize arbitrary inventory metadata or alter old graph files.
+    The renderer validates the logical path before using it for presentation.
+    """
+    if not isinstance(metadata, dict) or metadata.get('cfn_provenance') != 'stack_membership_v1':
+        return {}
+    return {key: metadata[key] for key in ('cfn_provenance', 'cfn_logical_path', 'logical_id', 'cfn_type')
+            if key in metadata}
 
 
 @dataclass

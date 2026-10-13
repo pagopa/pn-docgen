@@ -5,15 +5,15 @@ from pndocgen.engine.renderers.svg_geometry import Diagram, EPS
 from pndocgen.engine.renderers.svg_containers import text_audit, text_conflicts, contains, overlaps
 from pndocgen.engine.renderers.svg_normalizer import _reload, _serialize
 from pndocgen.engine.renderers.svg_text import union
-from pndocgen.engine.renderers.svg_preferences import _gate
+from pndocgen.engine.renderers.svg_preferences import _gate, _candidate
 
 
-def separate_node_labels(source, destination, *, max_shift=120, max_node_shift=120, gap=4, clearance=2):
+def separate_node_labels(source, destination, *, max_shift=120, max_node_shift=120, gap=4, clearance=2, min_terminal=10):
     source, destination = Path(source), Path(destination)
     if destination.exists() or source.resolve() == destination.resolve():
         raise FileExistsError(destination)
     if any(type(v) not in (int, float) or not math.isfinite(v) or v < 0
-           for v in (max_shift, max_node_shift, gap, clearance)):
+           for v in (max_shift, max_node_shift, gap, clearance, min_terminal)):
         raise ValueError('Node label clearance limits must be finite and nonnegative')
     diagram = Diagram.load(source)
     report = {'applied': [], 'skipped': []}
@@ -95,6 +95,35 @@ def separate_node_labels(source, destination, *, max_shift=120, max_node_shift=1
                 report['applied'].append({'node': key, 'dy': dy})
                 accepted = True
                 break
+            if not accepted:
+                # Last resort: translate the whole sibling column, retaining
+                # centered labels and alignment. Existing endpoint machinery
+                # checks every move; no new routes or inferred relations.
+                siblings = diagram.children_of(node.cluster_id)
+                if siblings and max(n.center[0] for n in siblings)-min(n.center[0] for n in siblings) <= EPS:
+                    offsets_x = set()
+                    for obstacle in obstacles:
+                        if box[1] < obstacle[1]+obstacle[3]+clearance and box[1]+box[3] > obstacle[1]-clearance:
+                            offsets_x.update((obstacle[0]-clearance-box[0]-box[2],
+                                              obstacle[0]+obstacle[2]+clearance-box[0]))
+                    for dx in sorted(offsets_x, key=lambda value: (abs(value), value)):
+                        if not EPS < abs(dx) <= max_node_shift:
+                            continue
+                        candidate = diagram
+                        for sibling in sorted(siblings, key=lambda n: (n.node_id != key, n.node_id)):
+                            candidate, failure = _candidate(candidate, sibling.node_id, 'x', dx, min_terminal, require_centering=False)
+                            if failure:
+                                break
+                        if failure or _gate(diagram, candidate, min_terminal):
+                            continue
+                        after = text_conflicts(candidate)
+                        if any(identity in c[1:3] for c in after):
+                            continue
+                        diagram, conflicts = candidate, after
+                        audit, boxes = text_audit(diagram)
+                        report['applied'].append({'node': key, 'dx': dx, 'mode': 'sibling column'})
+                        accepted = True
+                        break
             if not accepted:
                 report['skipped'].append((key, 'no safe bottom interval within limits'))
     with destination.open('xb') as stream:
