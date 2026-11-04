@@ -435,7 +435,7 @@ independent of `fit_text_containers`. The gap is measured to a conservative
 font box, not the text baseline, with the normalizer's 0.6px tolerance.
 
 The SVG pipeline measures supported plain text using the embedded D2 WOFF
-fonts (fontTools 4.60.1, no browser or font network requests at runtime).
+fonts (fontTools 4.68.0, no browser or font network requests at runtime).
 Under `render.normalization`, `fit_text_containers: true` enables horizontal
 fitting of explicit leaf columns, `text_container_margin: 16` controls padding,
 and `max_container_growth: 240` bounds width/ancestor expansion in SVG units.

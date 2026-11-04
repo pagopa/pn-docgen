@@ -187,6 +187,32 @@ def test_rule_policy_fallback_keeps_source_account_and_region(account, region):
     assert edge['source'] == ('routing' if (account, region) == (ACCOUNT, REGION) else rule_arn)
 
 
+@pytest.mark.parametrize('principal,expected', [
+    ('events.amazonaws.com', True),
+    ({'Service': 'events.amazonaws.com'}, True),
+    ({'Service': ['lambda.amazonaws.com', 'events.amazonaws.com']}, True),
+    ('events.amazonaws.com.attacker.example', False),
+    ('attacker-events.amazonaws.com', False),
+    ({'Service': 'events.amazonaws.com.attacker.example'}, False),
+    ({'Service': ['attacker-events.amazonaws.com']}, False),
+    ({'AWS': 'events.amazonaws.com'}, False),
+])
+def test_rule_policy_requires_exact_eventbridge_service_principal(principal, expected):
+    rule_arn = f'arn:aws:events:{REGION}:{ACCOUNT}:rule/sales/routing'
+    policy = {'Statement': [{'Effect': 'Allow', 'Action': 'sqs:SendMessage',
+                            'Principal': principal,
+                            'Condition': {'ArnEquals': {'aws:SourceArn': rule_arn}}}]}
+    d, _ = discoverer({'events': {'list_targets_by_rule': {'Targets': []}},
+                       'sqs': {'get_queue_attributes': {'Attributes': {
+                           'QueueArn': QUEUE, 'Policy': json.dumps(policy)}}}}, [
+        resource('Events::Rule', 'sales|routing', 'Routing'),
+        resource('SQS::Queue', URL, 'Jobs')])
+    d.dataflow_scopes.add(('aws', REGION, ACCOUNT))
+    d._enrich_eventbridge_targets()
+    d.to_inventory_nodes()
+    assert any(e['type'] == 'eventbridge_trigger' for e in d.to_edges()) is expected
+
+
 def test_sns_foreign_queue_keeps_concrete_scope():
     foreign = QUEUE.replace(ACCOUNT, '111111111111')
     topic = f'arn:aws:sns:{REGION}:{ACCOUNT}:notifications'

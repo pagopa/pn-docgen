@@ -1,4 +1,4 @@
-# Offline-tested on CPython 3.11.11, macOS arm64, D2 0.7.1.
+# Reference runtime: CPython 3.14.10, macOS arm64, D2 0.7.1.
 # Install with a pinned pn-docgen wheel; this file does not pin the wheel itself.
 boto3==1.42.96
 botocore==1.42.97
@@ -10,4 +10,4 @@ urllib3==2.8.0
 PyYAML==6.0.3
 Jinja2==3.1.6
 MarkupSafe==3.0.3
-fonttools==4.60.1
+fonttools==4.68.0

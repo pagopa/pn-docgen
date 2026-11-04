@@ -19,10 +19,10 @@ L2 are available for compatibility, not covered by this release's acceptance.
 
 ## Install from source
 
-Requires Python 3.11+ and **D2 0.7.1**. Run these commands from this repository:
+Requires Python 3.14+ and **D2 0.7.1**. The reference runtime is Python 3.14.10. Run these commands from this repository:
 
 ```sh
-python3.11 -m venv .venv
+python3.14 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements-runtime.lock
 python -m pip install --no-deps -e .
@@ -156,7 +156,7 @@ not a sanitizer: never force-add live artifacts or publish them automatically.
 ## Tests and packaging
 
 ```sh
-python -m pip install pytest==8.3.5 setuptools==75.8.0 wheel==0.45.1
+python -m pip install -r requirements-build.lock
 python -m pytest tests -q -p no:cacheprovider
 python scripts/build_release.py --output-dir /new/path/to/wheels
 ```
