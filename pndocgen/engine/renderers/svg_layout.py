@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 
 from pndocgen.engine.core.normalization_config import NormalizationConfig
-from pndocgen.engine.renderers.svg_alignment import Rule, normalize
+from pndocgen.engine.renderers.svg_alignment import Rule, normalize, audit_alignment
 from pndocgen.engine.renderers.svg_preferences import prefer_free_nodes, center_by_alternatives
 from pndocgen.engine.renderers.svg_labels import separate_labels
 from pndocgen.engine.renderers.svg_containers import fit_containers
@@ -125,6 +125,7 @@ def normalize_layout(source: Path, destination: Path, contracts,
                         include_singletons=settings.center_singletons,
                         allowed_clusters={name for name, rule in rules.items() if rule.layout != 'free'})
                     current = target
+            report["alignment_audit"] = audit_alignment(Diagram.load(current), rules)
         else:
             report["skipped"] = "disabled" if not settings.enabled else "no explicit layout metadata"
         with destination.open("xb") as handle:

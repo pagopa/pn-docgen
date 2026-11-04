@@ -145,7 +145,7 @@ def test_eventbridge_does_not_match_service_by_substring(target):
            'task': f'arn:aws:ecs:{REGION}:{ACCOUNT}:task/example-worker/uuid',
            'external': service('example-worker')['physical_id'].replace(ACCOUNT, '111111111111'),
            'exact': records[0]['physical_id']}[target]
-    d, session = discoverer({'events': {'list_targets_by_rule': {'Targets': [{'Arn': arn}]}}}, records)
+    d, session = discoverer({'events': {'describe_rule': {}, 'list_targets_by_rule': {'Targets': [{'Arn': arn}]}}}, records)
     d._enrich_eventbridge_targets()
     d.to_inventory_nodes()
     edges = d.to_edges()

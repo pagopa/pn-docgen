@@ -30,6 +30,7 @@ from pndocgen.engine.renderers.svg_geometry import (
     outside_viewbox,
     collisions,
     label_segment,
+    rect_box,
 )
 
 
@@ -120,6 +121,18 @@ def _shift_terminal_segment(edge: Edge, at_source: bool, delta: float, axis: str
     move_label = label_anchor is not None and (
         label_anchor[0] < corner_index if at_source else label_anchor[0] > corner_index
     )
+    adjacent_index = corner_index + 1 if at_source else corner_index - 1
+    if label_anchor is not None and not move_label and label_anchor[0] == adjacent_index:
+        # The adjoining straight segment changes length, not position. Usually
+        # its label stays fixed. If shortening cuts past its center, retain
+        # the label's offset from the moving end instead of detaching it.
+        # Every caller still applies the full collision/distance/attachment gate.
+        box = rect_box(edge.label_mask)
+        center = box[index] + box[index + 2] / 2
+        old_low, old_high = sorted((moving.anchor[index], fixed.anchor[index]))
+        new_low, new_high = sorted((moving.anchor[index] + delta, fixed.anchor[index]))
+        if old_low - EPS <= center <= old_high + EPS:
+            move_label = center < new_low - EPS or center > new_high + EPS
     if move_label:
         # The label and the hole in D2's shared path mask travel together.
         # Otherwise an aligned bundle can leave a floating label and a stale gap.

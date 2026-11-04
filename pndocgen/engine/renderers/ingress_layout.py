@@ -24,7 +24,9 @@ def group_ingress(text):
     text = text.replace(next(iter(blocks.values())), insertion + "\n" + next(iter(blocks.values())), 1)
     for name, block in blocks.items():
         text = text.replace(block, "", 1)
-        contracts["clusters"]["ingress." + name] = contracts["clusters"].pop(name)
+        for path in list(contracts["clusters"]):
+            if path == name or path.startswith(name + "."):
+                contracts["clusters"]["ingress." + path] = contracts["clusters"].pop(path)
     # Move scopes and rewrite endpoints, never add a semantic connection.
     for name in blocks:
         text = re.sub(rf'(?m)^{re.escape(name)}(?=\.| ->)', "ingress." + name, text)

@@ -1,7 +1,7 @@
 """
 pn-docgen - Source Analyzer Plugin Interface
 
-Every source analyzer (CFN storage, CFN microservice, pom.xml, etc.)
+Every source analyzer (CFN storage, CFN microservice, etc.)
 implements this interface. The main CfnAnalyzer orchestrates them.
 
 To add a new plugin:

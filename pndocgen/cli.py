@@ -88,7 +88,7 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     print(f"\nLambdas ({len(analysis.lambdas)}):")
     for fn in analysis.lambdas:
         print(f"  {fn}")
-    print(f"\nInternal deps from pom.xml ({len(analysis.internal_deps)}):")
+    print(f"\nInternal dependencies ({len(analysis.internal_deps)}):")
     for dep in analysis.internal_deps:
         print(f"  {dep}")
 
@@ -154,7 +154,7 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # --- analyze ---
-    p_ana = subparsers.add_parser("analyze", help="Static analysis of a microservice repo (CFN + pom.xml)")
+    p_ana = subparsers.add_parser("analyze", help="Static CloudFormation analysis of a microservice repo")
     p_ana.add_argument("--repo-path", required=True, help="Path to the microservice repo (e.g. repo_link/pn-delivery)")
     p_ana.add_argument("--output", default="component_analysis.json")
     p_ana.set_defaults(func=cmd_analyze)

@@ -237,9 +237,17 @@ def resolve(args: Any, logger: Any = None) -> None:
             if edge_type == "sqs_consumer":
                 queue_name = rel.get("source", "")
                 component_name = rel.get("target", "")
+                queue_ref = rel.get('source_ref')
             else:
                 queue_name = rel.get("target", "")
                 component_name = rel.get("source", "")
+                queue_ref = rel.get('target_ref')
+
+            identity = queue_ref['id'] if queue_ref else None
+            if queue_ref and queue_ref['type'] != 'AWS::SQS::Queue':
+                raise ValueError(f'Invalid SQS endpoint reference: {queue_ref!r}')
+            if identity:
+                queue_name = identity.rsplit(':', 1)[-1]
 
             if component_name not in graph.components:
                 owners = compute_owners.get(component_name, set())
@@ -253,21 +261,41 @@ def resolve(args: Any, logger: Any = None) -> None:
 
             existing_names = existing_names_by_component.setdefault(component_name, set())
             if queue_name in existing_names:
+                if identity:
+                    from pndocgen.sources.aws.resource_identity import sqs_identity
+                    matches = [n for c in graph.components[component_name].clusters.values()
+                               for n in c.nodes if n.name == queue_name]
+                    if not all(n.resource_type == 'sqs' and sqs_identity(n.id) == identity for n in matches):
+                        raise ValueError(f'Ambiguous SQS name across physical identities: {queue_name}')
                 continue
+
+            # A normalized owned name may differ from the physical queue name.
+            if identity:
+                from pndocgen.sources.aws.resource_identity import sqs_identity
+                if any(n.resource_type == 'sqs' and sqs_identity(n.id) == identity
+                       for c in graph.components[component_name].clusters.values() for n in c.nodes):
+                    continue
 
             comp = graph.components[component_name]
             synthetic_node = InventoryNode(
-                id=f"external://sqs/{queue_name}",
+                id=identity or f"external://sqs/{queue_name}",
                 name=queue_name,
                 resource_type="sqs",
-                account=comp.account,
-                region=region,
+                account=identity.split(':')[4] if identity else comp.account,
+                region=identity.split(':')[3] if identity else region,
                 metadata={
                     "component": component_name,
                     "external_reference": True,
                     "discovered_from": "iam_policy_edge",
+                    **({'resource_identity': queue_ref} if identity else {}),
                 },
             )
+            if identity and resolver._is_excluded(synthetic_node):
+                continue
+            if identity:
+                from pndocgen.engine.core.models import get_resource_meta, ResourceKind
+                if get_resource_meta('sqs', resolver.meta_overrides).kind != ResourceKind.NODE:
+                    continue
             comp.add_node(queue_cluster, synthetic_node)
             existing_names.add(queue_name)
             added += 1
@@ -285,8 +313,19 @@ def resolve(args: Any, logger: Any = None) -> None:
         logger.info("Include external policy queues: %s", include_external_queues)
     graph = resolver.resolve(nodes)
 
-    rels = inventory.get("relationships", [])
+    from copy import deepcopy
+    from pndocgen.sources.aws.resource_identity import reconcile_sqs
+    original_rels = inventory.get("relationships", [])
+    rels = deepcopy(original_rels)
+    reconcile_sqs(graph, rels)
     injected_queues = _inject_external_policy_queues(rels, region=inventory.get("region", ""))
+    reconcile_sqs(graph, rels)
+    from pndocgen.sources.aws.configured_references import materialize
+    materialize(graph, rels, resolver, include_external_queues=include_external_queues)
+    for original, resolved in zip(original_rels, rels):
+        for endpoint in ('source', 'target'):
+            if original[endpoint] != resolved[endpoint]:
+                resolved['input_' + endpoint] = original[endpoint]
     if injected_queues and logger:
         logger.info("Injected %d external SQS queue node(s) from IAM policy relationships", injected_queues)
 
@@ -298,6 +337,9 @@ def resolve(args: Any, logger: Any = None) -> None:
             edge_type=rel["type"],
             label=rel.get("label", ""),
             evidence=rel.get("evidence", ""),
+            source_ref=rel.get('source_ref'),
+            target_ref=rel.get('target_ref'),
+            evidence_details=rel.get('evidence_details', {}),
         )
         graph.add_edge(edge)
         rel_edges.append(edge)
@@ -390,6 +432,8 @@ def resolve(args: Any, logger: Any = None) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     graph.canonicalize()
     graph_output = graph.to_dict()
+    if not include_external_queues:
+        graph_output['resolution_scope'] = {'excluded_external_queues': True}
     report = resolution_report(nodes, rels, graph, resolver)
     if static_scheduler_bindings is not None:
         report["static_scheduler_bindings"] = static_scheduler_bindings
@@ -458,6 +502,9 @@ def generate(args: Any, logger: Any = None) -> None:
                 edge_type=e["type"],
                 label=e.get("label", ""),
                 evidence=e.get("evidence", ""),
+                source_ref=e.get('source_ref'),
+                target_ref=e.get('target_ref'),
+                evidence_details=e.get('evidence_details', {}),
             )
         )
     if graph.edges and logger:
@@ -471,6 +518,7 @@ def generate(args: Any, logger: Any = None) -> None:
     generator = D2Generator(templates_dir=templates_dir, render_theme=render_theme,
                             ingress_layout=getattr(args, "ingress_layout", None))
     generator.source_issues = graph_data.get("discovery_issues")
+    generator.resolution_scope = graph_data.get("resolution_scope", {})
 
     output_dir = Path(args.output_dir)
     level = getattr(args, "level", "all") or "all"

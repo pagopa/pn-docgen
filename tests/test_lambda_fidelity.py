@@ -201,7 +201,7 @@ def complete_lambda_inventory(reverse=False, return_session=False):
         "Action": "lambda:InvokeFunction",
         "Condition": {"ArnLike": {"AWS:SourceArn": f"arn:aws:execute-api:{REGION}:{ACCOUNT}:abc123/*"}}}]})}
     responses["apigateway"] = {"get_rest_api": {"name": "example-api"}}
-    responses["events"] = {"list_targets_by_rule": {"Targets": [{"Id": "worker", "Arn": FUNCTION + ":live"}]}}
+    responses["events"] = {"describe_rule": {}, "list_targets_by_rule": {"Targets": [{"Id": "worker", "Arn": FUNCTION + ":live"}]}}
     subscriptions = [{"Protocol": "sqs", "Endpoint": QUEUE, "SubscriptionArn": TOPIC + ":one"},
                      {"Protocol": "lambda", "Endpoint": FUNCTION + ":live", "SubscriptionArn": TOPIC + ":two"}]
     responses["sns"] = {"list_subscriptions_by_topic": {"Subscriptions": list(reversed(subscriptions)) if reverse else subscriptions}}
@@ -348,7 +348,7 @@ def test_attached_policies_read_all_pages_and_report_iam_evidence():
 
 
 def test_eventbridge_reads_second_page_and_removes_lambda_qualifier():
-    responses = {"events": {"list_targets_by_rule": lambda p: (
+    responses = {"events": {"describe_rule": {}, "list_targets_by_rule": lambda p: (
         {"Targets": [], "NextToken": "next"} if "NextToken" not in p
         else {"Targets": [{"Id": "worker", "Arn": FUNCTION + ":7"}]})}}
     discovery, session = discoverer(responses, [resource("Lambda::Function", "worker", "Worker"),

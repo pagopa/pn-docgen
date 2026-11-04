@@ -154,14 +154,14 @@ def test_l2_component_identifier_collision_fails_before_output(tmp_path):
 def test_aggregation_preserves_meaning(cluster, kind, label):
     edges = [Edge("a", "b", kind, label)]
     result = D2Generator._build_box_edges(edges, {"a": ("ecs", "a"), "b": (cluster, "b")})
-    assert result[0]["label"] == label
+    assert result[0]["label"] == "unspecified: " + label
 
 
 def test_aggregation_unions_labels_without_order_dependency():
     edges = [Edge("a", "b", "storage_access", label) for label in ("reads", "writes", "reads")]
     lookup = {"a": ("ecs", "a"), "b": ("dynamodb", "b")}
     assert D2Generator._build_box_edges(edges, lookup) == D2Generator._build_box_edges(list(reversed(edges)), lookup)
-    assert D2Generator._build_box_edges(edges, lookup)[0]["label"] == "reads; writes"
+    assert D2Generator._build_box_edges(edges, lookup)[0]["label"] == "unspecified: reads; unspecified: writes"
 
 
 def test_sqs_producer_sends_is_displayed_as_produces_without_changing_graph():
@@ -175,10 +175,10 @@ def test_sqs_producer_sends_is_displayed_as_produces_without_changing_graph():
     box = D2Generator._build_box_edges([producer, unrelated], lookup)
     detailed = D2Generator._build_node_edges_v65([producer, unrelated], lookup)
     assert {edge["to_box"]: edge["label"] for edge in box} == {
-        "queues": "produces", "external": "sends",
+        "queues": "unspecified: produces", "external": "unspecified: sends",
     }
     assert {edge["to_path"]: edge["label"] for edge in detailed} == {
-        "queues.q": "produces", "external.other": "sends",
+        "queues.q": "unspecified: produces", "external.other": "unspecified: sends",
     }
     assert producer.label == "sends"
 

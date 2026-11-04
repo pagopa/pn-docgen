@@ -38,7 +38,7 @@ def test_lambda_simplified_grid_and_internal_relations(tmp_path,intra,theme):
         assert all('d2_endpoints' in r for r in report['relationships'])
         pairs={(e.source,e.target) for e in diagram.edges}
         assert all(tuple(r['d2_endpoints']) in pairs for r in report['relationships'])
-        assert 'reads; writes' in d2.read_text()
+        assert 'unspecified: reads; unspecified: writes' in d2.read_text()
         assert not text_audit(diagram)[0]['overflow']
         assert not text_audit(diagram)[0]['unmeasured']
         if intra:

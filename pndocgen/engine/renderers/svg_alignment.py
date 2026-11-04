@@ -108,6 +108,43 @@ def _stable_signature(diagram):
     }
 
 
+def audit_alignment(diagram: Diagram, rules: dict[str, Rule]):
+    """Measure final contract fulfillment independently of attempted repairs."""
+    violations = []
+    checked = []
+    for cluster, rule in sorted(rules.items()):
+        if rule.layout == "free":
+            continue
+        checked.append(cluster)
+        if cluster not in diagram.containers:
+            violations.append({"cluster": cluster, "reason": "container not found"})
+            continue
+        if any(c.cluster_id == cluster for c in diagram.containers.values()):
+            violations.append({"cluster": cluster, "reason": "contract requires a leaf container"})
+            continue
+        nodes = diagram.children_of(cluster)
+        if len(nodes) < 2:
+            continue
+        axes = []
+        if rule.layout in {"column", "row"}:
+            axis = 0 if rule.layout == "column" else 1
+            axes.append([n.center[axis] for n in nodes])
+        else:
+            try:
+                columns = _grid_columns(nodes, rule.columns)
+            except ValueError as exc:
+                violations.append({"cluster": cluster, "reason": str(exc)})
+                continue
+            axes.extend([n.center[0] for n in column] for column in columns)
+            axes.extend([column[row].center[1] for column in columns if row < len(column)]
+                        for row in range(max(map(len, columns))))
+        spread = max(max(values) - min(values) for values in axes)
+        if spread > EPS:
+            violations.append({"cluster": cluster, "layout": rule.layout,
+                               "reason": "alignment contract not satisfied", "spread": spread})
+    return {"checked": checked, "violations": violations}
+
+
 def _port_offsets(diagram):
     return {(s.node_id, s.side): abs(s.offset) for s in find_port_spans(diagram)}
 

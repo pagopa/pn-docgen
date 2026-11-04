@@ -32,13 +32,19 @@ class ViewConfig:
     excluded_clusters: list[str] = field(default_factory=lambda: ["security", "misc"])
     excluded_purposes: list[str] = field(default_factory=lambda: ['logging', 'test'])
     purpose_rules: list[PurposeRule] = field(default_factory=list)
+    external_references: str = "none"
+    evidence_labels: str = "annotated"
 
     @classmethod
     def from_mapping(cls, value):
         if value is None:
             return cls()
-        if not isinstance(value, dict) or set(value) - {"exclusions", "edge_exclusions", "excluded_clusters", "excluded_purposes", "purpose_rules"}:
+        if not isinstance(value, dict) or set(value) - {"exclusions", "edge_exclusions", "excluded_clusters", "excluded_purposes", "purpose_rules", "external_references", "evidence_labels"}:
             raise ValueError("Unknown render.view setting")
+        for key, choices in (("external_references", ("none", "configured")),
+                             ("evidence_labels", ("annotated", "legacy"))):
+            if key in value and value[key] not in choices:
+                raise ValueError(f"render.view.{key} accepts {' or '.join(choices)}")
         purposes = value.get('excluded_purposes', ['logging', 'test'])
         if not isinstance(purposes, list) or any(not isinstance(v, str) or v not in PURPOSES for v in purposes):
             raise ValueError('excluded_purposes accepts application, tracing, logging, test')
@@ -83,7 +89,8 @@ class ViewConfig:
         return cls(sorted(set(parsed), key=lambda r: (r.component, r.resource_type, r.name_prefix)),
                    sorted(set(edges), key=lambda r: (r.component, r.edge_type, r.source or "", r.target or "")),
                    list(dict.fromkeys(clusters)), sorted(set(purposes)),
-                   sorted(set(roles), key=lambda r: (r.resource_type, r.name_prefix, r.purpose)))
+                   sorted(set(roles), key=lambda r: (r.resource_type, r.name_prefix, r.purpose)),
+                   value.get("external_references", "none"), value.get("evidence_labels", "annotated"))
 
 
 @dataclass(frozen=True)

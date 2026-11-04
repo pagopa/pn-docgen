@@ -106,6 +106,68 @@ in reporting. Resource `exclusions` below remain independent and unchanged.
 
 ## Hide resource nodes in the view
 
+### External references and evidence labels
+
+```yaml
+render:
+  view:
+    external_references: none  # none | configured
+    evidence_labels: annotated  # annotated | legacy
+```
+
+`none` hides newly declared external references. `configured` shows concrete
+SQS queue and EventBridge event-bus references used by captured configuration
+relations. They are marked `[reference]`: the declaration was captured, not the
+external resource independently discovered. No recursive discovery or calls to
+other accounts are made. IAM permissions alone do not expand the bus inventory.
+Historical IAM-derived external SQS inclusion is unchanged.
+
+`--exclude-external-queues` at resolve time takes precedence, including in
+`configured` mode. Resource, cluster, purpose and edge exclusions remain in
+effect. Changing this resolve flag requires resolving the inventory again;
+changing the two view options only requires generating from the saved graph.
+Older graphs cannot gain references or evidence that were never captured.
+
+| External type | Representation |
+| --- | --- |
+| `AWS::SQS::Queue` | Concrete scoped ARN or canonical SQS URL |
+| `AWS::Events::EventBus` | Concrete event-bus ARN |
+| Other external types | Retained as relationships with an omission reason; no invented node |
+
+`annotated` is the default. Examples are `IAM: send`, `IAM: receive`,
+`IAM: send/receive`, `IAM: read/write` and `IAM: PutEvents`. These describe
+Allow statements, not effective authorization or observed traffic. Conditions
+are retained in `evidence_details` and indicated by `(conditional)`.
+`config:`, `reference:`, `heuristic:`, `mixed:` and `unspecified:` distinguish
+other evidence. Aggregation retains the distinct labels. Bidirectional SQS
+collapse requires matching evidence and qualifiers.
+
+`legacy` retains the earlier labels and collapse presentation, not a stronger
+claim about application behavior. Both modes retain evidence in the reports.
+Annotated labels can change diagram geometry.
+These evidence-label options apply to L3 diagrams. L2 service maps retain
+their existing label presentation.
+
+Two additional edge types can be used in `edge_types` or
+`render.view.edge_exclusions`:
+
+- `eventbridge_rule_association`: bus → rule, from captured configuration.
+- `eventbridge_publish_permission`: compute → bus, from an IAM Allow for PutEvents.
+
+For selected rules, discovery reads `DescribeRule` in addition to targets,
+unless a description has already been captured. A denied description preserves
+the available targets and records a partial-discovery issue; it never implies
+ENABLED. Rule state, event pattern and bus, plus Pipe state/endpoints, survive
+inventory → graph → view report. Disabled rules and non-running Pipes are
+labelled accordingly. A simple literal detail-type may label the bus→rule edge;
+complex filters stay in the report. Neither case simulates event matching.
+
+The view report distinguishes excluded endpoints, references omitted by the
+view policy, unsupported external types and unresolved identities.
+`endpoint_diagnostics` qualifies each missing endpoint, including an explicit
+external-queue opt-out. Wildcard PutEvents resources produce discovery
+diagnostics, not synthetic bus nodes.
+
 ```yaml
 render:
   view:
@@ -311,6 +373,33 @@ The raw sidecar additionally preserves dataflow descriptions, links and identity
 scopes. Older captures lack this evidence; replay cannot recover it retroactively.
 
 # Text-aware container fitting
+
+Mixed leaf columns with internal links between different resource types use
+invisible layout subgroups for repeated same-type peers with no links between
+those peers. This keeps a peer column separate from internal routing, while
+preserving every resource and relationship. The rule uses resource types and
+rendered topology, never component names. Homogeneous groups, rows, grids and
+groups without cross-type internal links keep their existing layout.
+The view report's `d2_endpoints` includes any added layout scope; the source
+inventory and graph are unchanged.
+
+When every type in such an internally connected group has only one node,
+the group is treated as a routed flow (`free`), not a peer column. Its paths
+remain controlled by ELK; independent same-type groups retain alignment contracts.
+
+`separate_edge_labels: true` first moves overlapping edge labels individually
+along their existing straight segment. If neither label can move safely alone,
+it also tries a bounded atomic move of the overlapping pair. Each label keeps
+the configured `max_label_shift` limit; paths, endpoints and nodes stay fixed.
+The pair is accepted only if it reduces collisions without creating new ones
+and passes the same geometry and measured-text checks. No safe position means
+an explicit abstention, not a larger movement limit.
+
+With normalization enabled, `alignment_audit` in the render report/log measures
+the final SVG against its explicit row/column/grid contracts. Unsatisfied
+contracts produce a warning even when there are no collisions or text overflows.
+A safe abstention therefore remains visible as an unresolved layout issue.
+This does not relax `max_shift` or other geometric safety limits.
 
 `render.normalization.separate_node_labels: true` enables bounded clearance of
 bottom resource labels after the other passes. It first tries moving an unattached

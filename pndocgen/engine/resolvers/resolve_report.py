@@ -1,5 +1,6 @@
 """Account for every inventory input before the rendering view is selected."""
 from collections import Counter
+import json
 from pndocgen.engine.core.models import ResourceKind, get_resource_meta
 
 
@@ -28,7 +29,9 @@ def resolution_report(nodes, relationships, graph, resolver):
         resources.append({"id": node.id, "name": node.name, "type": node.resource_type, "status": status})
 
     def identity(edge):
-        return (edge["source"], edge["target"], edge["type"], edge.get("label", ""), edge.get("evidence", ""))
+        return (edge["source"], edge["target"], edge["type"], edge.get("label", ""), edge.get("evidence", ""),
+                json.dumps(edge.get('source_ref'), sort_keys=True), json.dumps(edge.get('target_ref'), sort_keys=True),
+                json.dumps(edge.get('evidence_details', {}), sort_keys=True))
     counts = Counter(identity(e) for e in relationships)
     resolved = {identity(e.to_dict()) for e in graph.edges}
     edges = []

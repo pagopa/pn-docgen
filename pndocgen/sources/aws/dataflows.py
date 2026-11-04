@@ -132,4 +132,14 @@ def resolved_links(discoverer):
             if not matches:
                 discoverer._record_issue('unresolved_dataflow_endpoint', identifier,
                                          f'{link["type"]}: {endpoint} outside captured resources or unresolved')
-        yield {**endpoints, **{k: link[k] for k in ('type', 'label', 'evidence')}}
+        from pndocgen.sources.aws.resource_identity import sqs_reference
+        references = {}
+        for endpoint in ('source', 'target'):
+            if link[endpoint + '_type'] == 'AWS::SQS::Queue':
+                ref = sqs_reference(link[endpoint])
+                if ref:
+                    references[endpoint + '_ref'] = ref
+            else:
+                references[endpoint + '_ref'] = {
+                    'type': link[endpoint + '_type'], 'id': link[endpoint]}
+        yield {**endpoints, **references, **{k: link[k] for k in ('type', 'label', 'evidence')}}

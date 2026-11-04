@@ -47,7 +47,7 @@ def test_filter_runs_before_bidirectional_collapse(monkeypatch, allowed, label):
     detailed = D2Generator._build_node_edges_v65(edges, lookup)
     generic = D2Generator._build_data_edges(edges, lookup, "example")
     assert len(detailed) == len(generic) == 1
-    assert detailed[0]["label"] == generic[0]["label"] == label
+    assert detailed[0]["label"] == generic[0]["label"] == "unspecified: " + label
 
 
 def _args(tmp_path, **overrides):

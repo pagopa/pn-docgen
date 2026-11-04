@@ -1,5 +1,11 @@
 # pn-docgen
 
+Relationship labels distinguish captured configuration, IAM permissions and
+uncertain evidence. They do not claim observed application traffic.
+Optional, one-hop external SQS/EventBridge references and compatibility labels
+are controlled centrally through `render.view`; see
+[configuration](CONFIGURATION.md#external-references-and-evidence-labels).
+
 Deterministic AWS component diagrams: CloudFormation discovery → inventory →
 component graph → D2/ELK → normalized SVG. No AI participates in layout.
 
@@ -127,6 +133,16 @@ may have no evidence. Omitted external endpoints are reported, not fabricated.
 Multiple ECS services retain distinct identities and service-specific
 relationships. Component-only relationships with more than one possible ECS
 owner are rejected or reported rather than assigned arbitrarily.
+
+New CFN SQS relationships retain optional `source_ref`/`target_ref` objects
+with an AWS resource `type` and concrete `id`. Queue ARN/URL identities include
+partition, region and account: a matching name alone cannot join another
+account's queue. Resolve reconciles the same queue across IAM and Pipe sources
+and preserves its identity through graph/view reports. EventBridge targets use
+the registered CFN rule identity rather than a separately computed display name.
+Ambiguous queue names are rejected instead of silently joining different resources.
+Historical captures without sufficient identity retain their legacy behavior;
+lost scope is not reconstructed from a profile or a label.
 
 New CFN captures retain verified logical ancestry for readable display labels.
 The shortest distinct logical suffix is used, with additional ancestor context

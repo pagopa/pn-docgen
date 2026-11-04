@@ -42,11 +42,16 @@ logger = logging.getLogger(__name__)
 
 
 def _display_edge_label(edge, fallback: str = "") -> str:
-    """Use one visual term for SQS production without changing graph evidence."""
-    label = edge.label or fallback
-    if edge.edge_type == "sqs_producer" and label.casefold() == "sends":
-        return "produces"
-    return label
+    from pndocgen.engine.core.evidence import display_label
+    return display_label(edge, fallback, legacy=get_app_config().render.view.evidence_labels == 'legacy')
+
+
+def _visual_edge_key(edge):
+    key = (edge.source, edge.target, edge.edge_type)
+    if get_app_config().render.view.evidence_labels != 'legacy':
+        from pndocgen.engine.core.evidence import signature
+        key += (edge.label, *signature(edge))
+    return key
 
 
 # Icons directory bundled inside the package: pndocgen/engine/d2/icons/aws/
@@ -274,6 +279,7 @@ class D2Generator:
         component, edges, view_report = prepare_view(
             component, edges or [], app_config.render.view,
             app_config.edge_filter, self._safe_id,
+            resolution_scope=getattr(self, 'resolution_scope', {}),
         )
         self.last_view_report = view_report
         supported = {"apigw", "rules", "queues", "ecs", "lambdas", "dynamodb",
@@ -324,6 +330,14 @@ class D2Generator:
                 safe = self._safe_id(node.name)
                 # Strip component name prefix from label for readability.
                 label = display_labels[node.name]
+                if node.metadata.get('discovered_from') == 'configured_reference':
+                    label += " [reference]"
+                state = node.metadata.get('eventbridge_rule', {}).get('State')
+                if state == 'DISABLED':
+                    label += " [disabled]"
+                pipe_state = node.metadata.get('eventbridge_pipe', {}).get('CurrentState')
+                if pipe_state and pipe_state != 'RUNNING':
+                    label += " [" + str(pipe_state).lower() + "]"
                 node_dicts.append({
                     "id":            safe,
                     "label":         label,
@@ -493,6 +507,9 @@ class D2Generator:
                 columns = generic_grids[name]
             layout = "column" if columns == 1 else "grid"
             contracts[name] = {"layout": layout, "columns": columns}
+        from pndocgen.engine.renderers.peer_layout import group_mixed_peers
+        d2_content, contracts, peer_paths = group_mixed_peers(
+            d2_content, clusters, data_edges, contracts)
         d2_content = CONTRACT_PREFIX + json.dumps(
             {"version": 1, "clusters": contracts}, sort_keys=True, separators=(",", ":")
         ) + "\n" + d2_content
@@ -504,6 +521,11 @@ class D2Generator:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         account_rendered_edges(view_report, node_lookup, resolved_pattern, detail_level,
                                data_edges + box_edges)
+        if peer_paths:
+            for relationship in view_report["relationships"]:
+                if "d2_endpoints" in relationship:
+                    relationship["d2_endpoints"] = [
+                        peer_paths.get(path, path) for path in relationship["d2_endpoints"]]
         d2_content = portable_icons(d2_content, output_path, _ICON_URL.values())
         view_report.update(pattern=resolved_pattern, detail_level=detail_level,
                            emitted_edge_count=len(data_edges) + len(box_edges))
@@ -545,6 +567,8 @@ class D2Generator:
         Returns:
             Path to the generated .d2 file.
         """
+        from pndocgen.engine.core.evidence import display_label
+
         template = self.env.get_template("L2_service_map.d2_template")
 
         # Component names present in the graph (used for cross-edge filtering)
@@ -601,7 +625,8 @@ class D2Generator:
             edge_dicts.append({
                 "from_id":  self._safe_id(source),
                 "to_id":    self._safe_id(target),
-                "label":    _display_edge_label(edge, edge.edge_type),
+                # Evidence presentation is an L3 view option, not an L2 change.
+                "label":    display_label(edge, edge.edge_type, legacy=True),
                 "edge_type": edge.edge_type,
                 "animated": edge.edge_type in _ANIMATED_EDGE_TYPES,
             })
@@ -748,6 +773,9 @@ class D2Generator:
             self.last_layout_report = normalize_layout(
                 temporary_output, final_output, contracts, self.normalization)
             logger.info("SVG explicit layout: %s", self.last_layout_report)
+            violations = self.last_layout_report.get("alignment_audit", {}).get("violations", [])
+            if violations:
+                logger.warning("SVG alignment contracts not satisfied: %s", violations)
             annotate_svg_icons(final_output)
             temporary_output = final_output
             canonical = d2_path.with_suffix(".svg")
@@ -948,7 +976,7 @@ class D2Generator:
             tgt = node_lookup.get(edge.target)
             if not (src and tgt):
                 continue
-            key = (edge.source, edge.target, edge.edge_type)
+            key = _visual_edge_key(edge)
             if key in seen:
                 continue
             seen.add(key)
@@ -1127,17 +1155,9 @@ class D2Generator:
         # Detect bidirectional SQS flow between same queue and compute node:
         # queue -> compute (sqs_consumer) + compute -> queue (sqs_producer).
         # Render as a single queue -> compute arrow labeled "consumes/produces".
-        bidir_pairs: set[tuple[str, str]] = set()
-        for edge in edges:
-            if edge.edge_type != "sqs_consumer":
-                continue
-            if any(
-                other.edge_type == "sqs_producer"
-                and other.source == edge.target
-                and other.target == edge.source
-                for other in edges
-            ):
-                bidir_pairs.add((edge.source, edge.target))
+        from pndocgen.engine.core.evidence import bidirectional_pairs, display_label
+        legacy = get_app_config().render.view.evidence_labels == 'legacy'
+        bidir_pairs = bidirectional_pairs(edges, legacy=legacy)
 
         for edge in edges:
             # Apply edge type filter from pndocgen.yaml [edge_types] section
@@ -1156,7 +1176,7 @@ class D2Generator:
             src_cluster, src_id = src_info
             tgt_cluster, tgt_id = tgt_info
 
-            key = (edge.source, edge.target, edge.edge_type)
+            key = _visual_edge_key(edge)
             if key in seen:
                 continue
             seen.add(key)
@@ -1173,7 +1193,7 @@ class D2Generator:
 
             label = _display_edge_label(edge)
             if edge.edge_type == "sqs_consumer" and (edge.source, edge.target) in bidir_pairs:
-                label = "consumes/produces"
+                label = display_label(edge, legacy=legacy, bidirectional=True)
 
             result.append({
                 "from_path":    from_path,

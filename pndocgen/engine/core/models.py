@@ -14,6 +14,7 @@ Contains:
 
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 from typing import Optional
 
 
@@ -257,6 +258,16 @@ class Edge:
     edge_type: str       # "sqs_produce" | "sqs_consume" | "http_call"
     label: str = ""      # optional label for the diagram arrow
     evidence: str = ""   # source of inference; empty for historical inventories
+    source_ref: dict | None = None
+    target_ref: dict | None = None
+    evidence_details: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.source_ref = endpoint_reference(self.source_ref)
+        self.target_ref = endpoint_reference(self.target_ref)
+        if not isinstance(self.evidence_details, dict):
+            raise ValueError('evidence_details must be a mapping')
+        self.evidence_details = json.loads(json.dumps(self.evidence_details, sort_keys=True, allow_nan=False))
 
     def to_dict(self) -> dict:
         result = {
@@ -267,7 +278,24 @@ class Edge:
         }
         if self.evidence:
             result["evidence"] = self.evidence
+        if self.evidence_details:
+            result["evidence_details"] = self.evidence_details
+        for endpoint in ('source', 'target'):
+            ref = getattr(self, endpoint + '_ref')
+            if ref is not None:
+                result[endpoint + '_ref'] = dict(ref)
         return result
+
+
+def endpoint_reference(value):
+    """Version-one additive reference contract; old snapshots omit it."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {'type', 'id'}
+            or not all(isinstance(v, str) and v for v in value.values())
+            or not value['type'].startswith('AWS::')):
+        raise ValueError(f'Invalid endpoint reference: {value!r}')
+    return {'type': value['type'], 'id': value['id']}
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +305,7 @@ class Edge:
 @dataclass
 class ComponentAnalysis:
     """
-    Result of static analysis of a microservice repository (CFN + pom.xml).
+    Result of static CloudFormation analysis of a microservice repository.
     Produced by cfn_analyzer.py, consumed by tag_resolver.py to enrich the graph.
     """
     name: str                          # e.g. "pn-delivery"
@@ -287,7 +315,7 @@ class ComponentAnalysis:
     http_clients: list = field(default_factory=list)     # microservices called via HTTP (from *BASEURL env vars)
     lambdas: list = field(default_factory=list)          # Lambda function names defined in CFN
     s3_buckets: list = field(default_factory=list)       # S3 buckets owned
-    internal_deps: list = field(default_factory=list)    # pn-* dependencies from pom.xml
+    internal_deps: list = field(default_factory=list)    # Retained for snapshot compatibility.
     metadata: dict = field(default_factory=dict)         # plugin-specific signals (e.g. uses_sqs)
 
     def to_dict(self) -> dict:
@@ -396,15 +424,32 @@ class Component:
 
 
 def label_metadata(metadata: dict) -> dict:
-    """Preserve only the versioned display provenance across graph JSON.
+    """Preserve versioned display provenance and explicit identity metadata.
 
     Do not serialize arbitrary inventory metadata or alter old graph files.
     The renderer validates the logical path before using it for presentation.
     """
-    if not isinstance(metadata, dict) or metadata.get('cfn_provenance') != 'stack_membership_v1':
+    if not isinstance(metadata, dict):
         return {}
-    return {key: metadata[key] for key in ('cfn_provenance', 'cfn_logical_path', 'logical_id', 'cfn_type')
-            if key in metadata}
+    result = {}
+    if metadata.get('cfn_provenance') == 'stack_membership_v1':
+        result.update({key: metadata[key] for key in ('cfn_provenance', 'cfn_logical_path', 'logical_id', 'cfn_type')
+                       if key in metadata})
+    if metadata.get('resource_identity') is not None:
+        result['resource_identity'] = endpoint_reference(metadata['resource_identity'])
+        for key in ('external_reference', 'discovered_from'):
+            if key in metadata:
+                result[key] = metadata[key]
+    for key, fields in (
+        ('eventbridge_rule', ('EventBusName', 'State', 'EventPattern', 'ScheduleExpression')),
+        ('eventbridge_pipe', ('CurrentState', 'DesiredState', 'Source', 'Target')),
+    ):
+        context = metadata.get(key)
+        if context is not None:
+            if not isinstance(context, dict):
+                raise ValueError(f'Invalid {key} metadata')
+            result[key] = {field: context[field] for field in fields if field in context}
+    return result
 
 
 @dataclass
@@ -450,6 +495,9 @@ class ComponentGraph:
                 _text_key(edge.edge_type),
                 _text_key(edge.label),
                 _text_key(edge.evidence),
+                json.dumps(edge.source_ref, sort_keys=True),
+                json.dumps(edge.target_ref, sort_keys=True),
+                json.dumps(edge.evidence_details, sort_keys=True),
             )
 
         def edge_key(edge: Edge) -> tuple:

@@ -272,6 +272,7 @@ class CfnLiveDiscoverer:
         self.dataflow_links: list[dict] = []
         self.dataflow_descriptions: dict = {}
         self.dataflow_scopes: set[tuple[str, str, str]] = set()
+        self.eventbridge_publish_permissions: list[dict] = []
         self.cfn = session.client("cloudformation", region_name=region)
         self.lmb = session.client("lambda", region_name=region)
         self.ecs = session.client("ecs", region_name=region)
@@ -365,6 +366,20 @@ class CfnLiveDiscoverer:
         if len(names) > 1:
             raise ValueError(f"Ambiguous relationship endpoint: {cfn_type} {identifier}")
         return next(iter(names), identifier)
+
+    def _queue_fields(self, identifier: str, endpoint: str) -> dict:
+        """Keep concrete scope while projecting a queue onto its registered name."""
+        from pndocgen.sources.aws.resource_identity import sqs_reference
+        ref = sqs_reference(identifier)
+        if not ref:
+            return {endpoint: self._queue_rawname_to_norm.get(identifier, identifier)}
+        identity = ref['id']
+        name = self._edge_resource_name('AWS::SQS::Queue', identity)
+        if name == identity:
+            raw = identity.rsplit(':', 1)[-1]
+            # A known namesake is not evidence of identity across account/region.
+            name = identity if ('AWS::SQS::Queue', raw) in self._resource_aliases else raw
+        return {endpoint: name, endpoint + '_ref': ref}
 
     def _ecs_endpoint(self, component: str) -> str:
         """Resolve exact service identities; keep legacy component inference guarded."""
@@ -559,6 +574,7 @@ class CfnLiveDiscoverer:
                               _normalize_name(physical_id, cfn_type, logical_id), name}:
                     self._resource_aliases.setdefault((cfn_type, alias), set()).add(name)
 
+                from pndocgen.sources.aws.event_context import metadata as event_metadata
                 nodes.append(InventoryNode(
                     id=physical_id,
                     name=name,
@@ -570,6 +586,7 @@ class CfnLiveDiscoverer:
                         "component": component,
                         "logical_id": logical_id,
                         "cfn_type": cfn_type,
+                        **event_metadata(self, cfn_type, physical_id),
                         **({'cfn_provenance': 'stack_membership_v1',
                             'cfn_logical_path': provenance[identity]} if identity in provenance else {}),
                     }
@@ -582,6 +599,10 @@ class CfnLiveDiscoverer:
                 if cfn_type == "AWS::SQS::Queue":
                     raw_url_name = physical_id.rstrip("/").split("/")[-1]
                     self._queue_rawname_to_norm[raw_url_name] = name
+                    from pndocgen.sources.aws.resource_identity import sqs_identity
+                    queue_identity = sqs_identity(physical_id)
+                    if queue_identity:
+                        self._resource_aliases.setdefault((cfn_type, queue_identity), set()).add(name)
 
         logger.info(
             "[cfn-live] Converted to %d InventoryNodes (deduped from %d raw)",
@@ -609,11 +630,9 @@ class CfnLiveDiscoverer:
 
         # 1. SQS → Lambda (EventSourceMapping)
         for t in self.lambda_sqs_triggers:
-            queue_name = t["queue_arn"].split(":")[-1].split("/")[-1]
-            queue_name = self._queue_rawname_to_norm.get(queue_name, queue_name)
             lambda_name = _lambda_name(t["lambda_arn"])
             edges.append({
-                "source": queue_name,
+                **self._queue_fields(t['queue_arn'], 'source'),
                 "target": lambda_name,
                 "type": "sqs_trigger",
                 "label": "triggers",
@@ -649,9 +668,10 @@ class CfnLiveDiscoverer:
         for ecs_component, queue_names in self.ecs_sqs_consumers.items():
             for raw_name in set(queue_names):
                 # Resolve raw CFN name → normalized human-readable name
-                norm_name = self._queue_rawname_to_norm.get(raw_name, raw_name)
+                queue_fields = self._queue_fields(raw_name, 'source')
+                norm_name = queue_fields['source']
                 edges.append({
-                    "source": norm_name,
+                    **queue_fields,
                     "target": self._ecs_endpoint(ecs_component),
                     "type": "sqs_consumer",
                     "label": "consumes",
@@ -662,10 +682,11 @@ class CfnLiveDiscoverer:
         # 2b. ECS → SQS (IAM policy SendMessage — ECS writes to queue)
         for ecs_component, queue_names in self.ecs_sqs_producers.items():
             for raw_name in set(queue_names):
-                norm_name = self._queue_rawname_to_norm.get(raw_name, raw_name)
+                queue_fields = self._queue_fields(raw_name, 'target')
+                norm_name = queue_fields['target']
                 edges.append({
                     "source": self._ecs_endpoint(ecs_component),
-                    "target": norm_name,
+                    **queue_fields,
                     "type": "sqs_producer",
                     "label": "produces",
                 })
@@ -719,6 +740,7 @@ class CfnLiveDiscoverer:
         for edge in self.eventbridge_ecs_edges:
             edges.append({
                 "source": edge["rule_name"],
+                'source_ref': {'type': 'AWS::Events::Rule', 'id': edge['rule_name']},
                 "target": self._ecs_endpoint(edge["ecs_component"]),
                 "type": "eventbridge_trigger",
                 "label": "triggers",
@@ -728,7 +750,10 @@ class CfnLiveDiscoverer:
         for edge in self.eventbridge_lambda_edges:
             edges.append({
                 "source": edge["rule_name"],
+                'source_ref': {'type': 'AWS::Events::Rule', 'id': edge['rule_name']},
                 "target": edge["lambda_name"],
+                **({'target_ref': {'type': 'AWS::Lambda::Function', 'id': edge['target_arn']}}
+                   if edge.get('target_arn') else {}),
                 "type": "eventbridge_trigger",
                 "label": "triggers",
             })
@@ -737,7 +762,8 @@ class CfnLiveDiscoverer:
         for edge in self.eventbridge_sqs_edges:
             edges.append({
                 "source": edge["rule_name"],
-                "target": edge["queue_name"],
+                'source_ref': {'type': 'AWS::Events::Rule', 'id': edge['rule_name']},
+                **self._queue_fields(edge.get('queue_arn', edge['queue_name']), 'target'),
                 "type": "eventbridge_trigger",
                 "label": "triggers",
                 "evidence": edge.get("evidence", "eventbridge_target_configuration"),
@@ -757,18 +783,19 @@ class CfnLiveDiscoverer:
         for edge in self.sns_edges:
             edges.append({
                 "source": edge["source_topic"],
-                "target": edge["target"],
+                **(self._queue_fields(edge.get('target_arn', edge['target']), 'target')
+                   if edge.get('target_type') == 'sqs' else {'target': edge['target']}),
                 "type": "sns_subscription",
                 "label": "fan-out",
             })
 
         for producer, queues in self.lambda_sqs_producers.items():
             for queue in sorted(set(queues)):
-                edges.append({"source": producer, "target": self._queue_rawname_to_norm.get(queue, queue),
+                edges.append({"source": producer, **self._queue_fields(queue, 'target'),
                               "type": "sqs_producer", "label": "produces"})
         for consumer, queues in self.lambda_sqs_consumers.items():
             for queue in sorted(set(queues)):
-                edges.append({"source": self._queue_rawname_to_norm.get(queue, queue), "target": consumer,
+                edges.append({**self._queue_fields(queue, 'source'), "target": consumer,
                               "type": "sqs_consumer", "label": "consumes"})
         # Queue aliases are shared by all relation sources, not just ECS IAM.
         for edge in edges:
@@ -797,8 +824,18 @@ class CfnLiveDiscoverer:
                 edge["source"] = self._queue_rawname_to_norm.get(edge["source"], edge["source"])
             if edge["type"] in {"sqs_producer", "sns_subscription", "eventbridge_trigger"}:
                 edge["target"] = self._queue_rawname_to_norm.get(edge["target"], edge["target"])
+            for endpoint in ('source', 'target'):
+                ref = edge.get(endpoint + '_ref')
+                if ref and ref['type'] == 'AWS::SQS::Queue':
+                    edge.update(self._queue_fields(ref['id'], endpoint))
         from pndocgen.sources.aws.dataflows import resolved_links
         edges.extend(resolved_links(self))
+        for permission in self.eventbridge_publish_permissions:
+            edge = {k: v for k, v in permission.items() if k != 'source_type'}
+            edge['source'] = (self._ecs_endpoint(permission['source']) if permission['source_type'] == 'ecs'
+                              else self._edge_resource_name('AWS::Lambda::Function', permission['source']))
+            edge['target'] = self._edge_resource_name('AWS::Events::EventBus', permission['target'])
+            edges.append(edge)
         return edges
 
     def _register_lambda_storage_access(
@@ -1187,6 +1224,8 @@ class CfnLiveDiscoverer:
                         self._record_issue("ecs_inline_role_policies", role_name, e)
 
                     for doc in policy_docs:
+                        from pndocgen.sources.aws.event_permissions import collect
+                        collect(self, doc, svc_arn, 'ecs')
                         for stmt in _statements(doc):
                             effect = stmt.get("Effect", "Allow")
                             if effect != "Allow":
@@ -1247,17 +1286,17 @@ class CfnLiveDiscoverer:
                                     continue
 
                                 if ":sqs:" in res_arn:
+                                    from pndocgen.sources.aws.resource_identity import sqs_identity
+                                    if not sqs_identity(res_arn):
+                                        self._record_issue('unresolved_sqs_identity', res_arn, 'Non-concrete queue scope')
+                                        continue
                                     queue_name = res_arn.split(":")[-1]
-                                    if not queue_name or queue_name == "*":
+                                    if not queue_name or "*" in queue_name or "?" in queue_name:
                                         continue
                                     if is_consumer:
-                                        self.ecs_sqs_consumers.setdefault(svc_arn, [])
-                                        self.ecs_sqs_consumers[svc_arn].append(queue_name)
-                                        logger.debug("[cfn-live] ECS SQS consumer: %s <- %s", component, queue_name)
+                                        self.ecs_sqs_consumers.setdefault(svc_arn, []).append(res_arn)
                                     if is_producer:
-                                        self.ecs_sqs_producers.setdefault(svc_arn, [])
-                                        self.ecs_sqs_producers[svc_arn].append(queue_name)
-                                        logger.debug("[cfn-live] ECS SQS producer: %s -> %s", component, queue_name)
+                                        self.ecs_sqs_producers.setdefault(svc_arn, []).append(res_arn)
                                     continue
 
                                 if ":dynamodb:" in res_arn and dynamo_modes:
@@ -1425,6 +1464,8 @@ class CfnLiveDiscoverer:
                 owned_buckets = component_buckets_by_name.get(component, set())
 
                 for doc in policy_docs:
+                    from pndocgen.sources.aws.event_permissions import collect
+                    collect(self, doc, lambda_norm, 'lambda')
                     for stmt in _statements(doc):
                         if stmt.get("Effect") != "Allow":
                             continue
@@ -1469,13 +1510,17 @@ class CfnLiveDiscoverer:
                                 continue
 
                             if ":sqs:" in res_arn and (sqs_send or sqs_receive):
+                                from pndocgen.sources.aws.resource_identity import sqs_identity
+                                if not sqs_identity(res_arn):
+                                    self._record_issue('unresolved_sqs_identity', res_arn, 'Non-concrete queue scope')
+                                    continue
                                 queue = res_arn.split(":")[-1]
                                 if not queue or "*" in queue or "?" in queue:
                                     continue
                                 if sqs_send:
-                                    self.lambda_sqs_producers.setdefault(lambda_norm, []).append(queue)
+                                    self.lambda_sqs_producers.setdefault(lambda_norm, []).append(res_arn)
                                 if sqs_receive:
-                                    self.lambda_sqs_consumers.setdefault(lambda_norm, []).append(queue)
+                                    self.lambda_sqs_consumers.setdefault(lambda_norm, []).append(res_arn)
                                 continue
 
                             if ":dynamodb:" in res_arn and dynamo_modes:
@@ -1645,16 +1690,6 @@ class CfnLiveDiscoverer:
         """
         import json as _json
 
-        def _build_rule_display_name(physical_id: str, logical_id: str) -> str:
-            """Build a rule name that matches the inventory node naming style."""
-            name = _normalize_name(physical_id, "AWS::Events::Rule", logical_id)
-            env_tokens = ("-dev-", "-prod-", "-staging-", "-uat-")
-            if logical_id and ("|" in physical_id or any(tok in name for tok in env_tokens)):
-                kebab = _re.sub(r"(?<!^)(?=[A-Z])", "-", logical_id).lower()
-                if kebab and len(kebab) > 3:
-                    return kebab
-            return name
-
         def _parse_rule_id(physical_id: str) -> tuple[Optional[str], str]:
             """Parse CFN rule physical id into (event_bus_name, rule_name)."""
             if "|" in physical_id:
@@ -1715,7 +1750,9 @@ class CfnLiveDiscoverer:
                         continue
 
                     event_bus_name, rule_api_name = _parse_rule_id(physical_id)
-                    rule_display_name = _build_rule_display_name(physical_id, logical_id)
+                    # Keep the CFN identity until the inventory registry projects
+                    # it onto a name. Display normalization must not perform joins.
+                    rule_display_name = physical_id
 
                     rule_entries.append({
                         "physical_id": physical_id,
@@ -1744,6 +1781,8 @@ class CfnLiveDiscoverer:
             event_bus_name = entry["event_bus_name"]
             rule_display_name = entry["rule_display_name"]
             rule_component = entry["component"]
+            from pndocgen.sources.aws.event_context import enrich_rule
+            enrich_rule(self, entry)
 
             try:
                 params = {"Rule": rule_api_name}
@@ -1751,7 +1790,7 @@ class CfnLiveDiscoverer:
                     params["EventBusName"] = event_bus_name
 
                 targets = list(_paged_items(self.events, "list_targets_by_rule", "Targets", **params))
-                self.dataflow_descriptions['eventbridge:' + entry['physical_id']] = {'Targets': targets}
+                self.dataflow_descriptions.setdefault('eventbridge:' + entry['physical_id'], {})['Targets'] = targets
                 for target in targets:
                     target_arn = target.get("Arn", "")
 
@@ -1778,6 +1817,7 @@ class CfnLiveDiscoverer:
                             self.eventbridge_lambda_edges.append({
                                 "rule_name": rule_display_name,
                                 "lambda_name": norm_fn,
+                                "target_arn": target_arn,
                                 "component": rule_component,
                             })
                             logger.debug(
@@ -1789,12 +1829,13 @@ class CfnLiveDiscoverer:
                     elif ":sqs:" in target_arn:
                         # EventBridge → SQS
                         queue_name = target_arn.split(":")[-1]
-                        edge_key = (rule_display_name, queue_name)
+                        edge_key = (rule_display_name, target_arn)
                         if edge_key not in seen:
                             seen.add(edge_key)
                             self.eventbridge_sqs_edges.append({
                                 "rule_name": rule_display_name,
                                 "queue_name": queue_name,
+                                'queue_arn': target_arn,
                                 "component": rule_component,
                             })
                             logger.debug(
@@ -1859,13 +1900,15 @@ class CfnLiveDiscoverer:
                             continue
 
                         rule_key = (source_bus or "", source_rule)
-                        source_rule_name = rule_name_by_key.get(rule_key)
+                        parts = source_arn.split(':', 5)
+                        in_scope = len(parts) == 6 and (parts[1], parts[3], parts[4]) in self.dataflow_scopes
+                        source_rule_name = rule_name_by_key.get(rule_key) if in_scope else None
                         source_rule_component = rule_component_by_key.get(rule_key, queue_component)
                         if not source_rule_name:
                             # Default fallback when rule is outside discovered stack scope.
-                            source_rule_name = _normalize_name(source_rule, "AWS::Events::Rule", "")
+                            source_rule_name = source_arn
 
-                        edge_key = (source_rule_name, queue_name)
+                        edge_key = (source_rule_name, queue_arn)
                         if edge_key in seen:
                             continue
 
@@ -1873,6 +1916,7 @@ class CfnLiveDiscoverer:
                         self.eventbridge_sqs_edges.append({
                             "rule_name": source_rule_name,
                             "queue_name": queue_name,
+                            'queue_arn': queue_arn,
                             "component": source_rule_component,
                             "evidence": "sqs_resource_policy_permission",
                         })
@@ -1999,6 +2043,7 @@ class CfnLiveDiscoverer:
                         self.sns_edges.append({
                             "source_topic": norm_topic,
                             "target": queue_name,
+                            'target_arn': endpoint,
                             "target_type": "sqs",
                             "component": component,
                         })
