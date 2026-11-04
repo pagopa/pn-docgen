@@ -93,6 +93,24 @@ def test_existing_file_is_never_overwritten(tmp_path, font_css):
         repair(source, source)
 
 
+@pytest.mark.parametrize('shape', ['circle', 'ellipse'])
+def test_unknown_drawable_prevents_title_movement(tmp_path, font_css, shape):
+    source = fixture(tmp_path, font_css)
+    tree = ET.parse(source)
+    group = ET.SubElement(tree.getroot(), NS + 'g',
+        {'class': base64.b64encode(b'box.unknown').decode()})
+    body = ET.SubElement(group, NS + 'g', {'class': 'shape'})
+    ET.SubElement(body, NS + shape, {'cx': '190', 'cy': '45', 'r': '20', 'rx': '20', 'ry': '20'})
+    tree.write(source)
+    target = tmp_path / 'unchanged.svg'
+    report = repair(source, target)
+    assert not report['applied']
+    assert report['skipped']
+    assert target.read_bytes() == source.read_bytes()
+    from pndocgen.engine.renderers.svg_containers import measured_text_gate
+    assert 'geometry' in measured_text_gate(Diagram.load(source), Diagram.load(target))
+
+
 @pytest.mark.parametrize('mapping', [
     {'separate_container_titles': 'true'}, {'max_title_shift': -1},
     {'max_title_shift': float('inf')},

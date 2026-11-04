@@ -39,6 +39,12 @@ def materialize(graph, relationships, resolver, *, include_external_queues=True)
     """
     original = {name: [n for c in comp.clusters.values() for n in c.nodes]
                 for name, comp in graph.components.items()}
+    owned_names = {}
+    for nodes in original.values():
+        for node in nodes:
+            identity = node_identity(node)
+            if identity:
+                owned_names.setdefault((node.resource_type, identity), set()).add(node.name)
     requests = {}
     for relation in relationships:
         if relation.get("evidence") not in CONFIGURED_EVIDENCE:
@@ -64,7 +70,11 @@ def materialize(graph, relationships, resolver, *, include_external_queues=True)
         if any(node_identity(n) == identity
                and n.resource_type == kind for n in nodes):
             continue
-        name = identity.rsplit(":", 1)[-1] if kind == "sqs" else identity.split(":event-bus/", 1)[1]
+        names = owned_names.get((kind, identity), set())
+        if len(names) > 1:
+            raise ValueError(f"Ambiguous configured identity: {identity}")
+        name = next(iter(names)) if names else (
+            identity.rsplit(":", 1)[-1] if kind == "sqs" else identity.split(":event-bus/", 1)[1])
         if any(n.name == name for n in nodes):
             raise ValueError(f"Ambiguous configured reference name: {name}")
         node = InventoryNode(identity, name, kind, identity.split(":")[4], identity.split(":")[3],

@@ -71,6 +71,8 @@ def text_conflicts(diagram):
 
 def measured_text_gate(before, after):
     """Reject new measured text defects; existing defects are not silently fixed."""
+    if before.unverified_shapes() or after.unverified_shapes():
+        return 'unsupported drawable geometry prevents safe layout edits'
     if any(element.get(attribute)
            for diagram in (before, after)
            for element in diagram.tree.getroot().iter()

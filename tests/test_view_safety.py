@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -17,6 +18,18 @@ def component(nodes):
     for cluster, name, kind in nodes:
         result.add_node(cluster, InventoryNode("test://" + name, name, kind, "local", "local"))
     return result
+
+
+def test_queue_relocation_rejects_final_path_collision_before_output(tmp_path):
+    item = component([('ecs', 'service', 'ecs_service'), ('queues', 'a-b', 'sqs'),
+                      ('output_queues', 'a_b', 'sqs')])
+    output = tmp_path / 'diagram.d2'
+    with pytest.raises(ValueError, match='identifier collision'):
+        D2Generator(TEMPLATES).generate_l3(item, output,
+            [Edge('service', 'a-b', 'sqs_producer')], detail_level='simplified')
+    assert not output.exists()
+    assert not output.with_suffix('.view.json').exists()
+    assert not (tmp_path / 'assets').exists()
 
 
 @pytest.mark.parametrize("value", [False, [], {"exclusions": {}}, {"typo": []},
@@ -78,6 +91,23 @@ def test_diagram_can_be_moved_without_source_checkout(tmp_path, monkeypatch):
     shutil.copytree(d2.parent / "assets", moved / "assets")
     monkeypatch.chdir(tmp_path)
     assert signature(generator.render(moved / "one.d2")) == expected
+
+
+@pytest.mark.parametrize('escaped', [False, True])
+def test_portable_icons_match_raw_and_json_escaped_paths(tmp_path, escaped):
+    from pndocgen.engine.renderers.assets import portable_icons
+    # Native Windows paths already contain backslashes; quotes are invalid in
+    # Windows filenames. POSIX permits both characters in this regression.
+    icon = tmp_path / ('icon.png' if os.name == 'nt' else 'folder\\icon"name.png')
+    icon.write_bytes(b'unchanged-icon-bytes')
+    value = json.dumps(str(icon), ensure_ascii=False)[1:-1] if escaped else str(icon)
+    content = 'node: {\n  icon: ' + value + '\n}\n'
+    result = portable_icons(content, tmp_path / 'diagram.d2', [icon])
+    assert 'icon: assets/' in result
+    assert str(icon) not in result and value not in result
+    copies = list((tmp_path / 'assets').glob('*.png'))
+    assert len(copies) == 1 and copies[0].read_bytes() == icon.read_bytes()
+    assert portable_icons(result, tmp_path / 'diagram.d2', [icon]) == result
 
 
 def test_existing_asset_is_never_overwritten(tmp_path):

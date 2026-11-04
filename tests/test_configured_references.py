@@ -13,6 +13,33 @@ from test_resource_identity import inventory, resolve, QUEUE, ACCOUNT, REGION
 BUS = f'arn:aws:events:{REGION}:{ACCOUNT}:event-bus/shared-events'
 
 
+@pytest.mark.parametrize('kind,aws_kind,identity', [
+    ('sqs', 'AWS::SQS::Queue', QUEUE),
+    ('aws_events_eventbus', 'AWS::Events::EventBus', BUS),
+])
+def test_cross_component_reference_reuses_owned_canonical_name(tmp_path, kind, aws_kind, identity):
+    data = flow_inventory()
+    data['resources'].append(dict(id=identity, name='normalized-owned', type=kind,
+        account=ACCOUNT, region=REGION, metadata={'component': 'owner',
+        'resource_identity': {'type': aws_kind, 'id': identity}}))
+    data['relationships'] = [dict(source='transport', target=identity, type='pipe_flow',
+        evidence='pipe_configuration', target_ref={'type': aws_kind, 'id': identity})]
+    graph, report = resolve(tmp_path, data)
+    assert graph['edges'][0]['target'] == 'normalized-owned'
+    reference = next(n for ns in graph['components']['example']['clusters'].values()
+                     for n in ns if n['id'] == identity)
+    assert reference['name'] == 'normalized-owned'
+    assert reference['metadata']['external_reference'] is True
+    owned = next(n for ns in graph['components']['owner']['clusters'].values()
+                 for n in ns if n['id'] == identity)
+    assert owned['name'] == reference['name']
+    assert not owned['metadata'].get('external_reference')
+    inverted = copy.deepcopy(data)
+    inverted['resources'].reverse()
+    inverted['relationships'].reverse()
+    assert resolve(tmp_path, inverted, name='inverse-owned')[0] == graph
+
+
 def flow_inventory():
     data = inventory()
     data['relationships'] = [data['relationships'][1], {

@@ -21,7 +21,9 @@ def separate_container_titles(source, destination, *, max_shift=120, margin=16, 
     diagram = Diagram.load(source)
     audit, boxes = text_audit(diagram)
     report = {'applied': [], 'skipped': []}
-    if audit['unmeasured'] or any(not e.path.supported for e in diagram.edges) or any(e.get(a) for e in diagram.tree.getroot().iter()
+    if diagram.unverified_shapes():
+        report['skipped'].append(('*', 'unsupported drawable geometry'))
+    elif audit['unmeasured'] or any(not e.path.supported for e in diagram.edges) or any(e.get(a) for e in diagram.tree.getroot().iter()
                                 for a in ('transform', 'filter', 'clip-path')):
         report['skipped'].append(('*', 'unmeasured text or unsupported SVG effects'))
     else:

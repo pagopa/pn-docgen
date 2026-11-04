@@ -251,6 +251,26 @@ class Diagram:
         )
         (self.containers if node.is_container else self.nodes)[node_id] = node
 
+    def unverified_shapes(self) -> list[str]:
+        """Decoded drawable groups must have geometry covered by our model.
+
+        Connection paths are verified separately. Definitions and arrow markers
+        are not node shapes. Additional primitives inside a node shape are unsafe
+        even when that group also contains a recognized rectangle or image.
+        """
+        unsupported = set()
+        primitives = {NS + tag for tag in ('circle', 'ellipse', 'path', 'polygon', 'polyline', 'line')}
+        for group in self.tree.getroot().iter(NS + 'g'):
+            identifier = decode_id(group.get('class', ''))
+            if identifier is None or edge_endpoints(identifier) is not None:
+                continue
+            for shape in group.iter(NS + 'g'):
+                if 'shape' not in shape.get('class', '').split():
+                    continue
+                if any(element.tag in primitives for element in shape.iter()):
+                    unsupported.add(identifier)
+        return sorted(unsupported)
+
     def _add_edge(self, edge_id: str, group: ET.Element) -> None:
         element = next(group.iter(f"{NS}path"), None)
         if element is None:

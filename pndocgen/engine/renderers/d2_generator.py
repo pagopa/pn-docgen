@@ -423,6 +423,16 @@ class D2Generator:
                 if output_queues:
                     clusters["output_queues"] = output_queues
 
+        # Relocation can merge formerly distinct namespaces. Validate the final
+        # declarations before edges, asset copying or artifact publication.
+        emitted_paths = set()
+        for cluster_name, nodes in clusters.items():
+            for node in nodes:
+                path = (cluster_name, node["id"])
+                if path in emitted_paths:
+                    raise ValueError(f"D2 identifier collision after relocation: {path}")
+                emitted_paths.add(path)
+
         # ── Build edges ───────────────────────────────────────────────────────
         if resolved_pattern == "ecs_microservice":
             if detail_level == "detailed":

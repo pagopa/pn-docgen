@@ -1,5 +1,6 @@
 """Bundle only referenced local icons beside an L3 D2 source for relocation."""
 import hashlib
+import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -19,8 +20,8 @@ def portable_icons(content: str, output: Path, icons) -> str:
     pending = {}
     for source in sorted({str(p) for p in icons if p}):
         # Match complete generated icon lines, not arbitrary labels/comments.
-        token = "icon: " + source + "\n"
-        if token not in content:
+        tokens = {"icon: " + value + "\n" for value in (source, json.dumps(source, ensure_ascii=False)[1:-1])}
+        if not any(token in content for token in tokens):
             continue
         data = Path(source).read_bytes()
         name = hashlib.sha256(data).hexdigest() + Path(source).suffix
@@ -28,7 +29,8 @@ def portable_icons(content: str, output: Path, icons) -> str:
         if target.exists() and target.read_bytes() != data:
             raise ValueError(f"Existing icon asset has unexpected content: {target}")
         pending[target] = data
-        content = content.replace(token, f"icon: assets/{name}\n")
+        for token in sorted(tokens):
+            content = content.replace(token, f"icon: assets/{name}\n")
     if pending:
         notice = assets / ASSET_NOTICE_NAME
         notice_data = ICON_NOTICE.read_bytes()
