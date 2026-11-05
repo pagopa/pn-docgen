@@ -592,6 +592,12 @@ class CfnLiveDiscoverer:
                     }
                 ))
 
+                # Register only scoped Lambda identities derived from captured metadata.
+                if cfn_type == 'AWS::Lambda::Function':
+                    ref = nodes[-1].metadata.get('resource_identity')
+                    if ref:
+                        self._resource_aliases.setdefault((cfn_type, ref['id']), set()).add(name)
+
                 # Build reverse map for SQS: raw URL name → normalized name.
                 # This is needed in to_edges() to resolve IAM policy ARN queue names
                 # (which are always raw CFN-generated names) back to the normalized
@@ -784,7 +790,10 @@ class CfnLiveDiscoverer:
             edges.append({
                 "source": edge["source_topic"],
                 **(self._queue_fields(edge.get('target_arn', edge['target']), 'target')
-                   if edge.get('target_type') == 'sqs' else {'target': edge['target']}),
+                   if edge.get('target_type') == 'sqs' else {
+                       'target': edge['target'],
+                       **({'target_ref': {'type': 'AWS::Lambda::Function', 'id': edge['target_arn']}}
+                          if edge.get('target_arn') else {})}),
                 "type": "sns_subscription",
                 "label": "fan-out",
             })
@@ -836,6 +845,17 @@ class CfnLiveDiscoverer:
                               else self._edge_resource_name('AWS::Lambda::Function', permission['source']))
             edge['target'] = self._edge_resource_name('AWS::Events::EventBus', permission['target'])
             edges.append(edge)
+        from pndocgen.sources.aws.resource_identity import lambda_identity
+        for edge in edges:
+            for endpoint in ('source', 'target'):
+                ref = edge.get(endpoint + '_ref')
+                if ref and ref.get('type') == 'AWS::Lambda::Function':
+                    identity = lambda_identity(ref.get('id'))
+                    if identity:
+                        names = self._resource_aliases.get(('AWS::Lambda::Function', identity), set())
+                        if len(names) > 1:
+                            raise ValueError(f'Ambiguous Lambda identity reference: {identity}')
+                        edge[endpoint] = next(iter(names), ref['id'])
         return edges
 
     def _register_lambda_storage_access(
@@ -1811,7 +1831,7 @@ class CfnLiveDiscoverer:
                         # EventBridge → Lambda
                         fn_name = _lambda_name(target_arn)
                         norm_fn = _normalize_name(fn_name, "AWS::Lambda::Function", "")
-                        edge_key = (rule_display_name, norm_fn)
+                        edge_key = (rule_display_name, target_arn)
                         if edge_key not in seen:
                             seen.add(edge_key)
                             self.eventbridge_lambda_edges.append({
@@ -2058,6 +2078,7 @@ class CfnLiveDiscoverer:
                         self.sns_edges.append({
                             "source_topic": norm_topic,
                             "target": norm_fn,
+                            "target_arn": endpoint,
                             "target_type": "lambda",
                             "component": component,
                         })

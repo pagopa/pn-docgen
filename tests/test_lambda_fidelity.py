@@ -18,6 +18,52 @@ TABLE = f"arn:aws:dynamodb:{REGION}:{ACCOUNT}:table/Table"
 TOPIC = f"arn:aws:sns:{REGION}:{ACCOUNT}:topic"
 
 
+@pytest.mark.parametrize('foreign', [
+    FUNCTION.replace(ACCOUNT, '111111111111'),
+    FUNCTION.replace(REGION, 'eu-central-1'),
+    FUNCTION.replace('arn:aws:', 'arn:aws-us-gov:'),
+])
+@pytest.mark.parametrize('qualifier', ['', ':live'])
+def test_sns_lambda_reference_preserves_foreign_scope(foreign, qualifier):
+    target = foreign + qualifier
+    d, session = discoverer({'sns': {'list_subscriptions_by_topic': {'Subscriptions': [
+        {'Protocol': 'lambda', 'Endpoint': target, 'SubscriptionArn': TOPIC + ':sub'}]}}}, [
+        resource('SNS::Topic', TOPIC, 'Topic'), resource('Lambda::Function', FUNCTION, 'Worker')])
+    d._enrich_sns_subscriptions()
+    d.to_inventory_nodes()
+    edge = d.to_edges()[0]
+    assert edge['target'] == target
+    assert edge['target_ref'] == {'type': 'AWS::Lambda::Function', 'id': target}
+    assert not session.unexpected
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_eventbridge_same_named_lambda_targets_keep_distinct_scopes(reverse):
+    foreign = FUNCTION.replace(ACCOUNT, '111111111111')
+    targets = [FUNCTION + ':live', foreign + ':live']
+    if reverse:
+        targets.reverse()
+    d, _ = discoverer({'events': {'describe_rule': {}, 'list_targets_by_rule': {
+        'Targets': [{'Arn': arn} for arn in targets]}}}, [
+        resource('Events::Rule', 'routing', 'Routing'), resource('Lambda::Function', FUNCTION, 'Worker')])
+    d._enrich_eventbridge_targets()
+    d.to_inventory_nodes()
+    edges = d.to_edges()
+    assert len(edges) == 2
+    assert {(e['target'], e['target_ref']['id']) for e in edges} == {
+        ('worker', FUNCTION + ':live'), (foreign + ':live', foreign + ':live')}
+
+
+def test_lambda_name_only_node_needs_captured_scope_for_arn_join():
+    from pndocgen.sources.aws.event_context import metadata
+    d, _ = discoverer()
+    assert metadata(d, 'AWS::Lambda::Function', 'worker') == {}
+    d.dataflow_scopes.add(('aws', REGION, ACCOUNT))
+    assert metadata(d, 'AWS::Lambda::Function', 'worker')['resource_identity']['id'] == FUNCTION
+    d.dataflow_scopes.add(('aws', REGION, '111111111111'))
+    assert metadata(d, 'AWS::Lambda::Function', 'worker') == {}
+
+
 class FakeClient:
     def __init__(self, responses, calls, unexpected, service):
         self.responses, self.calls, self.unexpected, self.service = responses, calls, unexpected, service
@@ -146,6 +192,8 @@ def test_sns_pages_and_lambda_alias_reference_function_not_alias():
     discovery, session = discoverer({"sns": {"list_subscriptions_by_topic": subscriptions}}, [
         resource("Lambda::Function", "worker", "Worker"), resource("SNS::Topic", TOPIC, "Topic")])
     discovery._enrich_sns_subscriptions()
+    # A live discovery records the owning stack's account/region scope.
+    discovery.dataflow_scopes.add(('aws', REGION, ACCOUNT))
     discovery.to_inventory_nodes()
     assert [(e["source"], e["target"]) for e in discovery.to_edges()] == [("topic", "worker")]
     assert not session.unexpected
@@ -354,6 +402,8 @@ def test_eventbridge_reads_second_page_and_removes_lambda_qualifier():
     discovery, session = discoverer(responses, [resource("Lambda::Function", "worker", "Worker"),
                                                resource("Events::Rule", "refresh-rule", "Rule")])
     discovery._enrich_eventbridge_targets()
+    discovery.dataflow_scopes.add(('aws', REGION, ACCOUNT))
+    discovery.to_inventory_nodes()
     assert [(e["source"], e["target"]) for e in discovery.to_edges()] == [("refresh-rule", "worker")]
     assert not session.unexpected and not discovery.issues
 

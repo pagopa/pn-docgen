@@ -314,9 +314,10 @@ def resolve(args: Any, logger: Any = None) -> None:
     graph = resolver.resolve(nodes)
 
     from copy import deepcopy
-    from pndocgen.sources.aws.resource_identity import reconcile_sqs
+    from pndocgen.sources.aws.resource_identity import reconcile_sqs, reconcile_lambdas
     original_rels = inventory.get("relationships", [])
     rels = deepcopy(original_rels)
+    reconcile_lambdas(graph, rels)
     reconcile_sqs(graph, rels)
     injected_queues = _inject_external_policy_queues(rels, region=inventory.get("region", ""))
     reconcile_sqs(graph, rels)

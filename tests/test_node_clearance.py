@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 import pytest
 from test_container_titles import font_css
 from pndocgen.engine.renderers.svg_node_clearance import separate_node_labels
-from pndocgen.engine.renderers.svg_geometry import Diagram
+from pndocgen.engine.renderers.svg_geometry import Diagram, NS
 from pndocgen.engine.renderers.svg_containers import text_conflicts
 from pndocgen.engine.renderers.svg_preferences import center_by_alternatives
 from pndocgen.engine.renderers.svg_geometry import find_port_spans
@@ -51,6 +51,20 @@ def test_effects_preserve_source(tmp_path, font_css, effect):
     destination = tmp_path/'after.svg'
     assert not separate_node_labels(source, destination)['applied']
     assert destination.read_bytes() == source.read_bytes()
+
+
+def test_clearance_abstains_for_unknown_drawable(tmp_path, font_css):
+    source = sample(tmp_path, font_css)
+    tree = ET.parse(source)
+    group = ET.SubElement(tree.getroot(), NS + 'g',
+        {'class': base64.b64encode(b'box.unknown').decode()})
+    shape = ET.SubElement(group, NS + 'g', {'class': 'shape'})
+    ET.SubElement(shape, NS + 'circle', {'cx': '320', 'cy': '180', 'r': '20'})
+    tree.write(source)
+    target = tmp_path / 'unchanged.svg'
+    report = separate_node_labels(source, target)
+    assert not report['applied'] and report['skipped']
+    assert target.read_bytes() == source.read_bytes()
 
 
 def test_zero_limits_and_existing_output(tmp_path, font_css):

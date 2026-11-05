@@ -14,6 +14,24 @@ QUEUE = f'arn:aws:sqs:{REGION}:{ACCOUNT}:jobs'
 URL = f'https://sqs.{REGION}.amazonaws.com/{ACCOUNT}/jobs'
 
 
+@pytest.mark.parametrize('qualified', [False, True])
+def test_resolve_lambda_typed_references_never_join_foreign_namesake(tmp_path, qualified):
+    data = inventory()
+    arn = f'arn:aws:lambda:{REGION}:{ACCOUNT}:function:worker'
+    foreign = arn.replace(ACCOUNT, '111111111111')
+    data['resources'][0]['metadata']['resource_identity'] = {'type': 'AWS::Lambda::Function', 'id': arn}
+    suffix = ':live' if qualified else ''
+    data['relationships'] = [dict(source='transport', target='worker', type='pipe_flow',
+        evidence='pipe_configuration', target_ref={'type': 'AWS::Lambda::Function', 'id': v + suffix})
+        for v in (arn, foreign)]
+    graph, _ = resolve(tmp_path, data)
+    assert {e['target'] for e in graph['edges']} == {'worker', foreign + suffix}
+    reverse = copy.deepcopy(data)
+    reverse['resources'].reverse()
+    reverse['relationships'].reverse()
+    assert resolve(tmp_path, reverse, name='inverse-lambda')[0] == graph
+
+
 @pytest.mark.parametrize('physical', ['sales|opaque-routing', 'opaque-routing'])
 def test_eventbridge_rule_and_target_join_same_physical_identity(physical):
     d, session = discoverer({'events': {'describe_rule': {}, 'list_targets_by_rule': {'Targets': [{'Arn': QUEUE}]}},

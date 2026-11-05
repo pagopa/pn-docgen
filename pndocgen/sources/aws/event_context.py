@@ -39,6 +39,14 @@ def enrich_rule(discoverer, entry):
 
 
 def metadata(discoverer, kind, identifier):
+    if kind == 'AWS::Lambda::Function':
+        from pndocgen.sources.aws.resource_identity import lambda_identity
+        identity = lambda_identity(identifier)
+        scopes = [s for s in discoverer.dataflow_scopes if s[1] == discoverer.region]
+        if not identity and len(scopes) == 1 and re.fullmatch(r'[A-Za-z0-9_-]+', identifier):
+            partition, region, account = scopes[0]
+            identity = lambda_identity(f'arn:{partition}:lambda:{region}:{account}:function:{identifier}')
+        return {'resource_identity': {'type': kind, 'id': identity}} if identity else {}
     if kind == "AWS::Events::EventBus":
         from pndocgen.sources.aws.configured_references import concrete_identity
         ref = {"type": kind, "id": identifier}

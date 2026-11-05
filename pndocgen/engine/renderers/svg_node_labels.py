@@ -3,7 +3,7 @@ import math
 
 from pndocgen.engine.renderers.svg_geometry import Diagram, EPS
 from pndocgen.engine.renderers.svg_normalizer import _serialize, _reload
-from pndocgen.engine.renderers.svg_containers import text_audit, text_conflicts
+from pndocgen.engine.renderers.svg_containers import text_audit, measured_text_gate
 
 
 def align_node_labels(source,destination,*,gap=4.0):
@@ -15,7 +15,7 @@ def align_node_labels(source,destination,*,gap=4.0):
     report={'applied':[],'skipped':[]}
     unsupported=any(e.get(a) for e in diagram.tree.getroot().iter() for a in ('transform','filter','clip-path'))
     audit,boxes=text_audit(diagram)
-    if unsupported or audit['unmeasured']:
+    if unsupported or audit['unmeasured'] or diagram.unverified_shapes():
         report['skipped'].append({'node':'*','reason':'unsupported geometry/text'})
     else:
         for key in sorted(diagram.nodes):
@@ -32,14 +32,7 @@ def align_node_labels(source,destination,*,gap=4.0):
             target=proposal.nodes[key].texts[0]
             target.set('y',f"{float(target.get('y'))+delta:.6f}")
             after,measured=text_audit(proposal)
-            failure=None
-            if set(after['overflow'])-set(audit['overflow']):
-                failure='new text overflow'
-            try:
-                if text_conflicts(proposal)-text_conflicts(diagram):
-                    failure='new text collision'
-            except ValueError as exc:
-                failure=str(exc)
+            failure=measured_text_gate(diagram,proposal)
             if failure:
                 report['skipped'].append({'node':key,'reason':failure})
             else:

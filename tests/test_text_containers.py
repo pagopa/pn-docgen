@@ -485,3 +485,28 @@ def test_node_labels_normalize_gap_without_moving_icons(tmp_path,font_css):
     second=tmp_path/'second.svg'
     align_node_labels(target,second)
     assert second.read_bytes()==target.read_bytes()
+
+
+@pytest.mark.parametrize('shape', ['circle', 'ellipse'])
+def test_node_label_alignment_abstains_for_unmeasured_shapes(tmp_path, font_css, shape):
+    from pndocgen.engine.renderers.svg_node_labels import align_node_labels
+    source, _ = synthetic(tmp_path, font_css)
+    tree = ET.parse(source)
+    diagram = Diagram.from_tree(tree, source)
+    text = diagram.nodes['rules.n0'].texts[0]
+    text.set('y', str(float(text.get('y')) + 25))
+    tree.write(source)
+    control = tmp_path / 'control.svg'
+    assert align_node_labels(source, control)['applied']
+    proposed = Diagram.load(control)
+    box = text_audit(proposed)[1][proposed.nodes['rules.n0'].texts[0]]
+    group = ET.SubElement(tree.getroot(), NS + 'g',
+        {'class': base64.b64encode(b'rules.unknown').decode()})
+    body = ET.SubElement(group, NS + 'g', {'class': 'shape'})
+    ET.SubElement(body, NS + shape, {'cx': str(box[0] + box[2]/2),
+        'cy': str(box[1] + box[3]/2), 'r': '4', 'rx': '4', 'ry': '4'})
+    tree.write(source)
+    target = tmp_path / 'preserved.svg'
+    report = align_node_labels(source, target)
+    assert not report['applied'] and report['skipped']
+    assert target.read_bytes() == source.read_bytes()

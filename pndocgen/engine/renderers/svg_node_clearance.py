@@ -18,7 +18,7 @@ def separate_node_labels(source, destination, *, max_shift=120, max_node_shift=1
     diagram = Diagram.load(source)
     report = {'applied': [], 'skipped': []}
     audit, boxes = text_audit(diagram)
-    if (audit['unmeasured'] or any(not e.path.supported for e in diagram.edges)
+    if (diagram.unverified_shapes() or audit['unmeasured'] or any(not e.path.supported for e in diagram.edges)
             or any(e.get(a) for e in diagram.tree.getroot().iter() for a in ('transform', 'filter', 'clip-path'))):
         report['skipped'].append(('*', 'unsupported SVG geometry or text'))
     else:
