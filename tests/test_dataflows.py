@@ -17,6 +17,33 @@ PIPE = A + 'pipes:eu-west-1:123456789012:pipe/transport'
 QUEUE = A + 'sqs:eu-west-1:123456789012:input'
 
 
+@pytest.mark.parametrize('qualifier', ['live', '7', '$LATEST'])
+@pytest.mark.parametrize('foreign', [None, 'account', 'region', 'partition'])
+def test_qualified_lambda_diagnostic_uses_complete_identity(qualifier, foreign):
+    from test_lambda_fidelity import discoverer, resource, FUNCTION, ACCOUNT, REGION
+    target = FUNCTION
+    if foreign == 'account':
+        target = target.replace(ACCOUNT, '111111111111')
+    elif foreign == 'region':
+        target = target.replace(REGION, 'eu-central-1')
+    elif foreign == 'partition':
+        target = target.replace('arn:aws:', 'arn:aws-us-gov:')
+    target += ':' + qualifier
+    d, session = discoverer(resources=[resource('Pipes::Pipe', PIPE, 'Transport'),
+                                      resource('Lambda::Function', FUNCTION, 'Worker')])
+    d.to_inventory_nodes()
+    add_link(d, 'AWS::Pipes::Pipe', PIPE, 'AWS::Lambda::Function', target,
+             'pipe_flow', 'forwards', 'pipe_configuration')
+    edge = d.to_edges()[0]
+    assert edge['target'] == (target if foreign else 'worker')
+    assert edge['target_ref']['id'] == target
+    unresolved = [i for i in d.issues if i['stage'] == 'unresolved_dataflow_endpoint']
+    assert len(unresolved) == (1 if foreign else 0)
+    if foreign:
+        assert unresolved[0]['resource'] == target
+    assert not session.unexpected
+
+
 def subject():
     clients = {name: Mock() for name in ('cloudformation', 'lambda', 'ecs', 'iam', 'sqs',
                'resourcegroupstaggingapi', 'apigateway', 'events', 'sns', 'firehose', 'pipes')}

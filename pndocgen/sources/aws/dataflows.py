@@ -115,6 +115,11 @@ def resolved_links(discoverer):
         for endpoint in ('source', 'target'):
             kind, identifier = link[endpoint + '_type'], link[endpoint]
             aliases = [identifier]
+            if kind == 'AWS::Lambda::Function':
+                from pndocgen.sources.aws.resource_identity import lambda_identity
+                canonical = lambda_identity(identifier)
+                if canonical:
+                    aliases.append(canonical)
             parts = identifier.split(':', 5)
             if len(parts) == 6 and parts[0] == 'arn':
                 if kind == 'AWS::S3::Bucket':
