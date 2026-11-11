@@ -1,4 +1,4 @@
-"""Explicit, guarded row/column/grid alignment derived from experiment 008."""
+"""Align explicit rows, columns and grids with geometry and text checks."""
 from __future__ import annotations
 
 import math

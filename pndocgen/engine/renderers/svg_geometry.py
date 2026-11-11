@@ -252,7 +252,7 @@ class Diagram:
         (self.containers if node.is_container else self.nodes)[node_id] = node
 
     def unverified_shapes(self) -> list[str]:
-        """Decoded drawable groups must have geometry covered by our model.
+        """Decoded drawable groups must have geometry covered by the model.
 
         Connection paths are verified separately. Definitions and arrow markers
         are not node shapes. Additional primitives inside a node shape are unsafe

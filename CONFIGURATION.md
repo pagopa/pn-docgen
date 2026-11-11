@@ -16,8 +16,8 @@ An explicitly selected missing file fails before discovery. `run` loads the
 selected configuration before static analysis or AWS client creation.
 
 Examples below are sections to edit in the chosen configuration. Preserve
-its other settings; do not add duplicate YAML keys. The old `diagrams:`
-section in the sample configuration is historical and is not read by the CLI.
+its other settings; do not add duplicate YAML keys. The `diagrams:` section
+in the sample configuration is not read by the CLI.
 
 ## Hide connections while retaining their resources
 
@@ -47,9 +47,9 @@ as well, use a resource exclusion below. Removing an exclusion restores an
 eligible connection already present in the saved graph; it does not discover
 or invent connections.
 
-**The current Mandate diagram's `EventBridge Triggers` box contains a
-Scheduler Schedule. Its connection type is `scheduler_trigger`, not
-`eventbridge_trigger`.** Box titles are not configuration identifiers.
+The `EventBridge Triggers` box can contain Scheduler Schedules. Their connection
+type is `scheduler_trigger`, not `eventbridge_trigger`. Box titles are not
+configuration identifiers.
 
 | Connection type | Meaning |
 |---|---|
@@ -120,7 +120,7 @@ SQS queue and EventBridge event-bus references used by captured configuration
 relations. They are marked `[reference]`: the declaration was captured, not the
 external resource independently discovered. No recursive discovery or calls to
 other accounts are made. IAM permissions alone do not expand the bus inventory.
-Historical IAM-derived external SQS inclusion is unchanged.
+IAM-derived external SQS inclusion remains supported.
 
 `--exclude-external-queues` at resolve time takes precedence, including in
 `configured` mode. Resource, cluster, purpose and edge exclusions remain in
@@ -288,7 +288,7 @@ generation fails explicitly. A failed conversion does not publish a partial
 PNG or a new SVG; pre-existing artifacts are preserved. An existing sibling
 SVG is accepted only if byte-identical to the new canonical render.
 
-# Central classification and essential view (candidate 051)
+## Central classification and essential view
 
 Resource visibility uses the shared resource registry for both ECS and Lambda,
 including replay of saved graphs. API Models and RequestValidators are internal
@@ -325,7 +325,7 @@ support objects. Classification does not invent missing relationships.
 When the specialized ECS template cannot represent a selected cluster, rendering
 uses the generic layout and records `layout_fallback` instead of hiding nodes.
 
-Future CFN captures save a private `.raw.json` sidecar before normalization.
+CFN discovery saves a private `.raw.json` sidecar before normalization.
 It contains collected resource records and discovery issues, not every AWS API
 response. Normalized inventories remain filtered. Keep raw files out of public
 repositories; existing capture files are never overwritten.

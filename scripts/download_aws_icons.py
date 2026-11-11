@@ -50,7 +50,7 @@ ICONS: dict[str, tuple[str, str]] = {
     "aws-cognito":        ("SecurityIdentityCompliance", "Cognito"),
 }
 
-# Frozen bytes of the locally validated icons. Upstream `main` may move;
+# Expected hashes for the pinned icon revision. Upstream `main` may move;
 # downloading a different image must fail rather than silently change renders.
 EXPECTED_SHA256 = {
     "aws-s3-tables": "8c6245d3da45607ec7a3ba8da27c4bb88bdf023ff34ebc257cd2c0c1cc129193",

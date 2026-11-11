@@ -1,7 +1,7 @@
 """Passaggio di simmetrizzazione dell'SVG: allineamento dei nodi e centraggio dei fasci.
 
-Derivato dall'esperimento 007 congelato. Correzioni locali applicate a un layout
-gia' calcolato, senza aggiungere pieghe o cambiare topologia: sposta un
+Applica correzioni locali a un layout gia' calcolato, senza aggiungere pieghe
+o cambiare topologia: sposta un
 nodo sull'asse di maggioranza del proprio cluster e si limita ad allungare o
 accorciare i segmenti terminali degli archi incidenti. Se una condizione non e'
 verificabile il passaggio **si astiene** e lascia il cluster com'era.

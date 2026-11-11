@@ -3,7 +3,7 @@ pn-docgen - D2 Diagram Generator
 
 Takes a ComponentGraph and generates D2 diagram files using Jinja2 templates.
 Supports L3 (microservice detail) diagrams.
-- ecs_microservice pattern uses the v74 golden layout (5-column, box-level edges)
+- ecs_microservice supports grouped and per-resource connections
 - other patterns use the generic L3_microservice template
 """
 
@@ -88,7 +88,7 @@ if _missing:
 
 # Node size by cluster role
 SIZE_MAP = {
-    # v74 golden layout cluster names
+    # ECS layout cluster names
     "apigw":    (60, 60),
     "rules":    (60, 60),
     "queues":   (60, 60),
@@ -145,7 +145,7 @@ _THEME_SERVICE_FILLS: dict[str, str] = {
 # I cluster sono emessi al primo livello: il path D2 coincide con il nome del cluster.
 _V74_BOX_PATH: dict[str, str] = {}
 
-# Box-level edge color coding for v74 ecs_microservice layout
+# Box-level edge color coding for the ECS layout
 # key: (src_cluster, dst_cluster) → (stroke_color, label, stroke_dash)
 _V74_BOX_EDGE_STYLE: dict[tuple[str, str], tuple[str, str, bool]] = {
     # Ingress → compute
@@ -351,7 +351,7 @@ class D2Generator:
                 clusters[cluster_name] = node_dicts
 
         # ── Post-process clusters based on pattern ───────────────────────────
-        # For ecs_microservice (v74): tag_resolver already assigned nodes to the
+        # For ecs_microservice: tag_resolver already assigned nodes to the
         # correct named clusters (apigw, rules, queues, ecs, lambdas, dynamodb).
         # For legacy patterns: re-route lambdas from compute → workers.
         if resolved_pattern == "ecs_microservice" and "compute" in clusters:
@@ -381,7 +381,7 @@ class D2Generator:
         #   API GW → SQS(consumer) → ECS → SQS(producer)
         #                                 ↘ DynamoDB
         #
-        # Only applies to simplified ecs_microservice layout; detailed (v65)
+        # Only applies to simplified ecs_microservice layout; detailed
         # keeps all queues in col2 because node-level arrows already clarify direction.
         if resolved_pattern == "ecs_microservice" and detail_level == "simplified":
             producer_queue_names: set[str] = set()
@@ -436,12 +436,12 @@ class D2Generator:
         # ── Build edges ───────────────────────────────────────────────────────
         if resolved_pattern == "ecs_microservice":
             if detail_level == "detailed":
-                # v65 detailed: node-level edges with column path prefixes
+                # Detailed view: node-level edges with cluster path prefixes
                 box_edges = []
                 structural_edges = []
                 data_edges = self._build_node_edges_v65(edges or [], node_lookup)
             else:
-                # v74 simplified: box-level edges (cluster → cluster)
+                # Simplified view: box-level edges (cluster → cluster)
                 box_edges = self._build_box_edges(edges or [], node_lookup)
                 structural_edges = []
                 data_edges = []
@@ -501,8 +501,8 @@ class D2Generator:
             for resource in view_report["resources"]:
                 if resource["cluster"] in unsupported and resource["status"] == "included":
                     resource.update(status="not_in_template", reason="cluster not supported by ECS template")
-            # An isolated unsupported resource was historically omitted. Preserve
-            # that view, but disclose it; never emit a misleading implicit node.
+            # Disclose omitted isolated resources; never emit a misleading
+            # implicit node for a cluster absent from the template.
             unsupported_names = {n.name for c, cluster in component.clusters.items()
                                  if c in unsupported for n in cluster.nodes}
             if any(e.source in unsupported_names or e.target in unsupported_names for e in edges):
@@ -895,7 +895,7 @@ class D2Generator:
 
     @staticmethod
     def _grid_columns(children: int) -> int:
-        """Colonne della griglia in funzione dei figli (ricetta v6, esperimento 002)."""
+        """Calcola le colonne della griglia in funzione del numero di figli."""
         if children >= 9:
             return 3
         if children >= 4:
@@ -1036,7 +1036,7 @@ class D2Generator:
         node_lookup: dict[str, tuple[str, str]],
     ) -> list[dict]:
         """
-        Build box-level (cluster→cluster) edge dicts for the v74 ecs_microservice layout.
+        Build box-level (cluster→cluster) edge dicts for the ECS layout.
 
         Instead of routing arrows between individual nodes, aggregates all
         intra-component edges into cluster-pair relationships and emits one
@@ -1045,7 +1045,7 @@ class D2Generator:
         The D2 path is the cluster name itself:
             apigw, rules, queues, ecs, lambdas, dynamodb, storage, external
 
-        Color coding mirrors the golden_v74 reference:
+        Edge colors:
             blue   (#1565C0) — integrations / consume
             orange (#F57C00) — triggers (EventBridge, SQS→Lambda)
             green  (#2E7D32) — reads/writes to storage
@@ -1121,13 +1121,13 @@ class D2Generator:
         node_lookup: dict[str, tuple[str, str]],
     ) -> list[dict]:
         """
-        Build node-level edge dicts for the v65 detailed template.
+        Build node-level edge dicts for the detailed ECS template.
 
         Unlike _build_box_edges (which aggregates to cluster level), this method
         emits one arrow per intra-component edge, with full D2 node paths:
             queues.{node_id} → ecs.{node_id}
 
-        Color coding matches v65 golden reference:
+        Edge colors:
             blue   (#1565C0) — SQS consumer / API GW integrations
             orange (#F57C00) — EventBridge / SQS triggers
             green  (#2E7D32) — storage reads/writes

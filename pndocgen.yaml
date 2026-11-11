@@ -6,8 +6,7 @@
 # a different AWS project.
 
 # ─── Project Identity ────────────────────────────────────────────────────────
-# These values replace every hardcoded project-specific identifier
-# reference that was previously scattered across the codebase.
+# Identifiers used for project-specific resource naming and discovery.
 project:
   prefix: "pn-"
   aws_profile_regex: 'sso_pn-([a-z]+)-([a-z]+)(?:-readonly)?'
@@ -121,7 +120,7 @@ render:
   theme: white
 
 # ─── Diagrams ─────────────────────────────────────────────────────────────────
-# Historical examples only: this section is not consumed by the CLI.
+# Example declarations; this section is not consumed by the CLI.
 # Use render.view.exclusions for supported view-only resource exclusions.
 diagrams:
 

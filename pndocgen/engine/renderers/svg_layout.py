@@ -1,6 +1,6 @@
 """Deterministic post-layout pipeline, with contracts emitted by the generator.
 
-Legacy D2 files without metadata keep their existing 007 normalization only.
+D2 files without layout metadata receive only cluster and port normalization.
 No inference of intended layouts from SVG geometry or regular expressions.
 """
 import json

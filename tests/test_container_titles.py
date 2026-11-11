@@ -1,4 +1,4 @@
-"""Synthetic safety tests for the title-only prototype; no AWS or browser."""
+"""Synthetic safety tests for container-title placement; no AWS or browser."""
 import base64
 from pathlib import Path
 import re

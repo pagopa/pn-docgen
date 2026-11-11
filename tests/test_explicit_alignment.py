@@ -1,4 +1,4 @@
-"""Focused contracts and guard tests for the isolated experiment."""
+"""Contract and safety tests for explicit row, column and grid alignment."""
 import base64
 from pathlib import Path
 import sys

@@ -1,4 +1,4 @@
-"""Prefer free nodes and bounded singleton moves, derived from experiment 009."""
+"""Prefer free nodes and bounded singleton moves within layout constraints."""
 from __future__ import annotations
 
 from pathlib import Path

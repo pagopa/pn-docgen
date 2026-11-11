@@ -9,13 +9,9 @@ are controlled centrally through `render.view`; see
 Deterministic AWS component diagrams: CloudFormation discovery → inventory →
 component graph → D2/ELK → normalized SVG. No AI participates in layout.
 
-This is the local pre-PR implementation, not a published release. The public
-suite is self-contained; private captures and experimental outputs are not
-part of the source distribution. There is no automatic publishing workflow.
-
-The first-version scope is **L3, one AWS account/region per capture, ECS and
-Lambda components**. Use the CFN discovery mode. Legacy tag/both discovery and
-L2 are available for compatibility, not covered by this release's acceptance.
+Use **L3 diagrams with CFN discovery for ECS and Lambda components**, with
+one AWS account/region per capture. Tag/both discovery and L2 service maps
+are also available for compatibility.
 
 ## Install from source
 
@@ -34,8 +30,7 @@ The icon downloader uses an immutable upstream commit and verifies all registere
 SHA-256 hashes. Icons are downloaded only by that explicit setup command, not
 by diagram generation. Their artwork is separately licensed; preserve NOTICE.
 Install D2 0.7.1 from its official release for your platform, rather than relying
-on the moving latest package-manager version. Linux ARM64 and macOS ARM64 have
-been exercised locally; other platforms need their own acceptance run.
+on the moving latest package-manager version.
 
 ## Generate from a saved capture — no AWS calls
 
@@ -128,23 +123,23 @@ by the shared classification registry.
 
 Relationships may describe IAM permissions, configuration bindings, environment
 references or same-component heuristics. They are **not observed traffic**.
-Evidence is available where known; historical and some static relationships
+Evidence is available where known; older captures and some static relationships
 may have no evidence. Omitted external endpoints are reported, not fabricated.
 Multiple ECS services retain distinct identities and service-specific
 relationships. Component-only relationships with more than one possible ECS
 owner are rejected or reported rather than assigned arbitrarily.
 
-New CFN SQS relationships retain optional `source_ref`/`target_ref` objects
+CFN SQS relationships retain optional `source_ref`/`target_ref` objects
 with an AWS resource `type` and concrete `id`. Queue ARN/URL identities include
 partition, region and account: a matching name alone cannot join another
 account's queue. Resolve reconciles the same queue across IAM and Pipe sources
 and preserves its identity through graph/view reports. EventBridge targets use
 the registered CFN rule identity rather than a separately computed display name.
 Ambiguous queue names are rejected instead of silently joining different resources.
-Historical captures without sufficient identity retain their legacy behavior;
-lost scope is not reconstructed from a profile or a label.
+Captures without scoped resource identities cannot distinguish resources by
+account or region; missing scope is not reconstructed from a profile or label.
 
-New CFN captures retain verified logical ancestry for readable display labels.
+CFN captures retain verified logical ancestry for readable display labels.
 The shortest distinct logical suffix is used, with additional ancestor context
 on collisions. IDs and relationship endpoints do not change. Missing or
 ambiguous provenance keeps technical labels; older captures remain compatible.
@@ -163,26 +158,23 @@ python scripts/build_release.py --output-dir /new/path/to/wheels
 
 The default suite uses synthetic inputs, blocks Python sockets/AWS clients and
 does not require private captures. Private tests are explicitly skipped unless
-`--private-root=/path/to/private/checkout` is supplied. Current render acceptance
-also requires `--private-baselines=/path/to/versioned/acceptance` with its hashed
-manifest. Exact historical geometry comparisons require `--legacy-goldens`:
-they are diagnostic, not the current layout contract. Changes from historical
-goldens include corrected semantic labels, Scheduler visibility, text-aware
-container fitting and bounded port centering. Do not publish private fixtures
-or silently regenerate old goldens. Public synthetic tests remain runnable
-without any of these private directories.
+`--private-root=/path/to/private/checkout` is supplied. Private render comparisons
+also require `--private-baselines=/path/to/versioned/acceptance` with its hashed
+manifest. The optional `--legacy-goldens` flag runs diagnostic comparisons
+against older reference layouts. Private fixtures and reference outputs must
+remain outside public Git. The default suite runs without these directories.
 
 Before distributing a wheel, verify its contents: package code, four templates,
-registered unchanged icons, icon NOTICE and project LICENSE; no captures/experiments.
+registered unchanged icons, icon NOTICE and project LICENSE; exclude private
+captures and generated artifacts.
 Build after downloading the verified icons. An installation without icons has
-a rectangle fallback, not the accepted AWS-icon visual style.
+a rectangle fallback.
 The build helper checks every icon hash and requires a new output directory;
 it uses installed build dependencies with no package index or persistent cache.
 It may create standard build/egg-info files in the source checkout.
 
-With the same pinned D2 binary, inputs and configuration, repeated and
-order-inverted generation is tested byte-for-byte. D2 builds may record
-`0.7.1` or `v0.7.1` in the SVG version attribute: this metadata difference does
+Use the same pinned D2 binary, inputs and configuration for reproducible output.
+D2 builds may record `0.7.1` or `v0.7.1` in the SVG version attribute: this metadata difference does
 not change geometry. Pin the actual platform binary for stable byte diffs.
 
 ## PNG export
@@ -197,15 +189,14 @@ embedded text fail explicitly. Existing output files are never overwritten.
 
 ## Licenses
 
-Project code: [EUPL 1.2](LICENSE), matching the PN repositories selected by the
-project owner. AWS icon artwork is separate; see
+Project code: [EUPL 1.2](LICENSE). AWS icon artwork is separate; see
 [the icon NOTICE](pndocgen/engine/d2/icons/aws/NOTICE.txt). Keep attribution with
 redistributed assets and diagrams. The project license does not relicense the
 artwork or authorize publication of private deployment data.
 
 AWS explicitly permits architecture-diagram use on its
 [Architecture Icons page](https://aws.amazon.com/architecture/icons/).
-For our pinned icon copies, the upstream
+For the pinned icon copies, the upstream
 [License Summary](https://github.com/awslabs/aws-icons-for-plantuml/blob/e26e2c05daf8b6bc4c764669fc2be04c314ccb8c/README.md#license-summary)
 declares CC BY-ND 2.0 for artwork, separately from MIT for upstream code.
 See the NOTICE for the exact revision, license text and redistribution conditions.

@@ -4,11 +4,9 @@ pndocgen config loader.
 Reads pndocgen.yaml (or pndocgen.yml) from CWD or an explicit path and
 builds an AppConfig that centralises **all** project-specific values.
 
-The tool is project-agnostic: every project-specific constant that was
-previously hardcoded now lives in the YAML under ``project`` and
-``discovery`` sections.  When those sections are absent the dataclasses
-fall back to empty/generic defaults so the tool still works (it just
-won't apply any project-specific heuristics).
+Project-specific values live under the YAML ``project`` and ``discovery``
+sections. When those sections are absent, the dataclasses use generic defaults
+without project-specific heuristics.
 
 YAML format (abridged)
 -----------------------
@@ -99,7 +97,7 @@ class ProjectConfig:
     Example: ``'sso_pn-([a-z]+)-([a-z]+)(?:-readonly)?'``"""
 
     java_group_id: str = ""
-    """Maven groupId prefix for the POM analyzer (e.g. ``"com.example"``)."""
+    """Reserved Maven groupId setting (e.g. ``"com.example"``)."""
 
     description: str = "AWS Architecture Diagram Generator"
     """Human-readable project title shown in CLI help and diagram titles."""

@@ -1,4 +1,4 @@
-"""Offline regression against frozen 007 artifacts and synthetic geometries."""
+"""Offline normalization tests using reference SVGs and synthetic geometries."""
 
 import copy
 import base64

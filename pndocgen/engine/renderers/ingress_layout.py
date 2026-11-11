@@ -1,4 +1,4 @@
-"""Emit an invisible ingress peer band using the validated ELK layout."""
+"""Emit an invisible ingress peer band for ELK layout."""
 import json
 import re
 from pndocgen.engine.renderers.svg_layout import CONTRACT_PREFIX
@@ -14,7 +14,7 @@ def group_ingress(text):
     if "ingress" in contracts["clusters"] or any(k.startswith("ingress.") for k in contracts["clusters"]):
         return text
     blocks = {}
-    # Adapter deliberately restricted to blocks emitted by our templates.
+    # Adapter restricted to blocks emitted by the generator templates.
     for match in re.finditer(r'^([A-Za-z_]\w*): "[^"\n]*" \{\n.*?^\}\n', text, re.M | re.S):
         if match[1] in names:
             blocks[match[1]] = match[0]

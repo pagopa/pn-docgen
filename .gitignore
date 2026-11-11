@@ -50,8 +50,7 @@ diagrams/
 *.svg
 !tests/fixtures/*.svg
 
-# Local experiment results and rollback snapshots may contain live-derived data.
-# Keep the entire trees out of accidental `git add -A`; experiment scripts remain local.
+# Local-only data and working directories.
 /experiments/
 /checkpoints/
 /poc/
