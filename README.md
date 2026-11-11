@@ -1,217 +1,207 @@
 # pn-docgen
 
-`pn-docgen` is an AWS architecture diagram generator.
+Relationship labels distinguish captured configuration, IAM permissions and
+uncertain evidence. They do not claim observed application traffic.
+Optional, one-hop external SQS/EventBridge references and compatibility labels
+are controlled centrally through `render.view`; see
+[configuration](CONFIGURATION.md#external-references-and-evidence-labels).
 
-It discovers infrastructure and runtime relationships, resolves resources into
-microservice components, and generates D2 diagrams (L3 component detail),
-optionally rendered as PNG or SVG.
+Deterministic AWS component diagrams: CloudFormation discovery → inventory →
+component graph → D2/ELK → normalized SVG. No AI participates in layout.
 
-## How it works
+Use **L3 diagrams with CFN discovery for ECS and Lambda components**, with
+one AWS account/region per capture. Tag/both discovery and L2 service maps
+are also available for compatibility.
 
-```text
-AWS APIs (CloudFormation, Lambda, ECS, ...)  [read-only]
-              ↓
-pn-docgen discover  →  inventory.json
-              ↓
-pn-docgen resolve   →  component_graph.json
-              ↓
-pn-docgen generate  →  *.d2 (+ *.png with --render)
+## Install from source
+
+Requires Python 3.14+ and **D2 0.7.1**. The reference runtime is Python 3.14.10. Run these commands from this repository:
+
+```sh
+python3.14 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-runtime.lock
+python -m pip install --no-deps -e .
+python scripts/download_aws_icons.py
+d2 --version
 ```
 
-## Quick start
+The icon downloader uses an immutable upstream commit and verifies all registered
+SHA-256 hashes. Icons are downloaded only by that explicit setup command, not
+by diagram generation. Their artwork is separately licensed; preserve NOTICE.
+Install D2 0.7.1 from its official release for your platform, rather than relying
+on the moving latest package-manager version.
 
-### 1) Install
+## Generate from a saved capture — no AWS calls
 
-```bash
-pip install -e pn-docgen/
+Use new output paths: existing inventories, graphs and diagrams are not overwritten.
+
+```sh
+pn-docgen resolve --inventory /private/path/inventory.json \
+  --config /path/to/central/pndocgen.yaml --output /private/new/graph.json
+
+pn-docgen generate --graph /private/new/graph.json \
+  --config /path/to/central/pndocgen.yaml \
+  --output-dir /private/new/diagrams --level l3 \
+  --detail-level simplified --theme white --render
 ```
 
-### 2) Download AWS icons (one time)
+For per-resource connections use `--detail-level detailed`. ECS simplified
+keeps the resources but aggregates connections between groups, preserving
+their labels. Lambda simplified also aggregates cross-group connections and
+arranges independent groups as compact grids. Within-group connections remain
+node-level, with a column layout instead of a grid for that group. All selected
+resources remain visible; original relationships are traced in the view report.
+`--component` selects an exact component name, not a prefix.
 
-```bash
-python pn-docgen/scripts/download_aws_icons.py
+## Live capture — AWS read APIs
+
+Only run after verifying and authorizing the profile, region and component.
+SSO login and authorization are the operator's responsibility. No deployment
+or AWS resource mutations are part of the tool.
+
+```sh
+pn-docgen run --profile YOUR_READONLY_PROFILE --region YOUR_REGION \
+  --component YOUR_COMPONENT --discovery-source cfn \
+  --config /path/to/central/pndocgen.yaml \
+  --output-dir /private/new/capture --level l3 \
+  --detail-level simplified --theme white --render
 ```
 
-### 3) Install D2 CLI (for PNG rendering)
+Use a read-only role granting the read APIs needed by CFN, tagging, Lambda,
+ECS, IAM, API Gateway, EventBridge and SNS enrichments. A denied enrichment is
+recorded in `discovery_issues`: a diagram with warnings is a **partial map**.
+An explicitly selected component with no discovered resources fails, preserving
+the empty capture for diagnosis. Generation producing no diagrams also fails.
 
-```bash
-# macOS
-brew install d2
-```
+`--repo-path` optionally enriches from local CloudFormation. This is static
+source evidence, not proof that the local revision is deployed. Review the
+source hashes and unresolved bindings in the resolve report.
 
-Other platforms: https://d2lang.com/tour/install
+For a saved inventory, add `--repo-path /path/to/component-repository` to
+`resolve` to enable the same static enrichment. Explicit Scheduler-to-Lambda
+references are matched by unique logical IDs, not similar resource names.
+An empty `discovery_issues` list is not a completeness guarantee: unsupported
+database endpoints, arbitrary HTTP/ALB routing and external storage references
+may remain unconnected. A disconnected icon does not prove that a resource is
+unused.
 
-### 4) Configure AWS credentials
+## Configuration and visibility
 
-```bash
-aws sso login --profile <your-profile>
-```
-
----
-
-## Commands overview
-
-| Command | Purpose | Typical output |
-|---|---|---|
-| `discover` | Read AWS resources + inferred relationships | `inventory.json` |
-| `resolve` | Group resources by component and normalize edges | `component_graph.json` |
-| `generate` | Generate L3 diagrams from a graph | `.d2` (+ `.png` / `.svg` with `--render`) |
-| `run` | Full pipeline (`discover` → `resolve` → `generate`) | inventory + graph + L3 diagrams |
-
----
-
-## Example workflows
-
-### A) Discovery only
-
-Single component:
-
-```bash
-python -m pndocgen.cli discover \
-  --profile <your-profile> \
-  --region <aws-region> \
-  --discovery-source cfn \
-  --component <component-name> \
-  --output inventory.json
-```
-
-All components:
-
-```bash
-python -m pndocgen.cli discover \
-  --profile <your-profile> \
-  --region <aws-region> \
-  --discovery-source cfn \
-  --output inventory.json
-```
-
-### B) Resolve only
-
-```bash
-python -m pndocgen.cli resolve \
-  --inventory inventory.json \
-  --include-dlq \
-  --exclude-external-queues \
-  --output component_graph.json
-```
-
-### C) Generate only (from existing graph)
-
-L3 simplified:
-
-```bash
-python -m pndocgen.cli generate \
-  --graph component_graph.json \
-  --output-dir docs/generated \
-  --level l3 \
-  --detail-level simplified \
-  --pattern ecs_microservice \
-  --render-format png \
-  --render
-```
-
-L3 detailed:
-
-```bash
-python -m pndocgen.cli generate \
-  --graph component_graph.json \
-  --output-dir docs/generated \
-  --level l3 \
-  --detail-level detailed \
-  --pattern ecs_microservice \
-  --render-format png \
-  --render
-```
-
-### D) Full pipeline in one command
-
-Single component, detailed L3:
-
-```bash
-python -m pndocgen.cli run \
-  --profile <your-profile> \
-  --region <aws-region> \
-  --discovery-source cfn \
-  --component <component-name> \
-  --include-dlq \
-  --exclude-external-queues \
-  --level l3 \
-  --detail-level detailed \
-  --pattern ecs_microservice \
-  --output-dir docs/generated \
-  --render-format png \
-  --render
-```
-
-All components, L3:
-
-```bash
-python -m pndocgen.cli run \
-  --profile <your-profile> \
-  --region <aws-region> \
-  --discovery-source cfn \
-  --level l3 \
-  --detail-level simplified \
-  --pattern auto \
-  --output-dir docs/generated \
-  --render-format svg \
-  --render
-```
-
----
-
-## Key options
-
-- `--discovery-source`: `tag` | `cfn` | `both`
-- `--level`: `l3`
-- `--detail-level`: `simplified` | `detailed`
-- `--pattern`: `auto` | `ecs_microservice` | `lambda_microservice`
-- `--include-dlq`: include DLQ queues in resolved graph (default: excluded)
-- `--exclude-external-queues`: exclude SQS queues referenced by IAM policies but not discovered in component stacks (default: included)
-- `--render`: render image via D2 CLI
-- `--render-format`: `png` | `svg` (default: `png`, used with `--render`)
-
----
-
-## Output structure
-
-Generated files are grouped by component under the selected output directory.
-
-Typical artifacts:
-- `<component>_<timestamp>_inventory.json`
-- `<component>_<timestamp>_graph.json`
-- `<component>_<timestamp>_L3.d2` or `<component>_<timestamp>_L3_detailed.d2`
-
----
-
-## Configuration (`pndocgen.yaml`)
-
-You can customize classification and filtering rules with a local config file:
+One central YAML can serve all component repositories; repository-local files
+are not required. Explicit `--config` takes precedence and a missing explicit
+file is an error. See [CONFIGURATION.md](CONFIGURATION.md).
 
 ```yaml
-resource_kinds:
-  skip:
-    - aws_wafv2_webacl
-    - target_group
-  node:
-    - aws_lambda_layerversion
-
-exclude:
-  name_patterns:
-    - "*-dlq"
-    - "*-dead-letter*"
+render:
+  theme: white
+  view:
+    exclusions:
+      - component: pn-delivery
+        resource_type: lambda
+        name_prefix: pn-delivery-versioning-
+    edge_exclusions:
+      - component: pn-mandate
+        edge_type: dynamodb_stream
 ```
 
----
+Security and Misc nodes are centrally omitted from the diagram in this
+essential view. They are not erased from saved graphs. Unknown types can be
+omitted through Misc even if operationally important, for example an
+unclassified Pipe: inspect the view report. Schedules are classified as Rules
+and remain visible. Support objects such as API models and policies are filtered
+by the shared classification registry.
 
-## Requirements
+## Output and interpretation
 
-- Python 3.11+
-- AWS credentials (SSO profile or `AWS_*` env vars)
-- D2 CLI (`d2`) for PNG rendering
-- Read-only AWS permissions:
-  - `cloudformation:ListStackResources`
-  - `resourcegroupstaggingapi:GetResources`
-  - `lambda:ListEventSourceMappings`
-  - `ecs:DescribeServices`
-  - `ecs:DescribeTaskDefinition`
+- `.raw.json`: private CFN resource records before inventory conversion; not a
+  recording of every enrichment response.
+- Inventory JSON and graph JSON: reusable snapshots for offline generation.
+- `.resolve.json`: input accounting and static-source diagnostics.
+- `.d2`, relative `assets/`, `.view.json`: diagram source and view decisions.
+- `.svg`: standalone rendered image with embedded icons and attribution.
+
+Relationships may describe IAM permissions, configuration bindings, environment
+references or same-component heuristics. They are **not observed traffic**.
+Evidence is available where known; older captures and some static relationships
+may have no evidence. Omitted external endpoints are reported, not fabricated.
+Multiple ECS services retain distinct identities and service-specific
+relationships. Component-only relationships with more than one possible ECS
+owner are rejected or reported rather than assigned arbitrarily.
+
+CFN SQS relationships retain optional `source_ref`/`target_ref` objects
+with an AWS resource `type` and concrete `id`. Queue ARN/URL identities include
+partition, region and account: a matching name alone cannot join another
+account's queue. Resolve reconciles the same queue across IAM and Pipe sources
+and preserves its identity through graph/view reports. EventBridge targets use
+the registered CFN rule identity rather than a separately computed display name.
+Ambiguous queue names are rejected instead of silently joining different resources.
+Captures without scoped resource identities cannot distinguish resources by
+account or region; missing scope is not reconstructed from a profile or label.
+
+CFN captures retain verified logical ancestry for readable display labels.
+The shortest distinct logical suffix is used, with additional ancestor context
+on collisions. IDs and relationship endpoints do not change. Missing or
+ambiguous provenance keeps technical labels; older captures remain compatible.
+Display labels are not a privacy filter for live-derived output.
+
+Keep live-derived captures, reports and images private. `.gitignore` is a guard,
+not a sanitizer: never force-add live artifacts or publish them automatically.
+
+## Tests and packaging
+
+```sh
+python -m pip install -r requirements-build.lock
+python -m pytest tests -q -p no:cacheprovider
+python scripts/build_release.py --output-dir /new/path/to/wheels
+```
+
+The default suite uses synthetic inputs, blocks Python sockets/AWS clients and
+does not require private captures. Private tests are explicitly skipped unless
+`--private-root=/path/to/private/checkout` is supplied. Private render comparisons
+also require `--private-baselines=/path/to/versioned/acceptance` with its hashed
+manifest. The optional `--legacy-goldens` flag runs diagnostic comparisons
+against older reference layouts. Private fixtures and reference outputs must
+remain outside public Git. The default suite runs without these directories.
+
+Before distributing a wheel, verify its contents: package code, four templates,
+registered unchanged icons, icon NOTICE and project LICENSE; exclude private
+captures and generated artifacts.
+Build after downloading the verified icons. An installation without icons has
+a rectangle fallback.
+The build helper checks every icon hash and requires a new output directory;
+it uses installed build dependencies with no package index or persistent cache.
+It may create standard build/egg-info files in the source checkout.
+
+Use the same pinned D2 binary, inputs and configuration for reproducible output.
+D2 builds may record `0.7.1` or `v0.7.1` in the SVG version attribute: this metadata difference does
+not change geometry. Pin the actual platform binary for stable byte diffs.
+
+## PNG export
+
+PNG is rasterized from the final normalized SVG using optional resvg-py 0.5.0
+(Rust resvg 0.48.1). Install with `pip install '.[raster]'`, then use
+`--render --render-format png`. Both the canonical SVG and PNG are saved.
+Only fonts embedded by D2 are used; system fonts are disabled. The PNG keeps
+icon attribution and the source SVG SHA-256 in its metadata. Rendering is
+local; there are no font downloads. Images over 40 megapixels and unsupported
+embedded text fail explicitly. Existing output files are never overwritten.
+
+## Licenses
+
+Project code: [EUPL 1.2](LICENSE). AWS icon artwork is separate; see
+[the icon NOTICE](pndocgen/engine/d2/icons/aws/NOTICE.txt). Keep attribution with
+redistributed assets and diagrams. The project license does not relicense the
+artwork or authorize publication of private deployment data.
+
+AWS explicitly permits architecture-diagram use on its
+[Architecture Icons page](https://aws.amazon.com/architecture/icons/).
+For the pinned icon copies, the upstream
+[License Summary](https://github.com/awslabs/aws-icons-for-plantuml/blob/e26e2c05daf8b6bc4c764669fc2be04c314ccb8c/README.md#license-summary)
+declares CC BY-ND 2.0 for artwork, separately from MIT for upstream code.
+See the NOTICE for the exact revision, license text and redistribution conditions.
+A NOTICE alone is not blanket permission: preserve attribution and licensing,
+and do not treat the artwork as freely modifiable. Attribution is provided in
+the NOTICE and embedded SVG/PNG metadata, without visible diagram credits or
+layout changes. Preserve those notices when distributing outputs and check
+the license conditions for the intended use.

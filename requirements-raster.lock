@@ -1,0 +1,2 @@
+# Optional PNG renderer; install together with requirements-runtime.lock.
+resvg-py==0.5.0

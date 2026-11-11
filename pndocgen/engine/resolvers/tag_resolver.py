@@ -29,20 +29,14 @@ logger = logging.getLogger(__name__)
 _ROLE_TO_CLUSTER = {
     SemanticRole.INGRESS:   "inputs",
     SemanticRole.COMPUTE:   "compute",
-    SemanticRole.MESSAGING: "messaging",  # usually inputs or outputs, handled dynamically? for now simplified
+    SemanticRole.MESSAGING: "messaging",
     SemanticRole.STORAGE:   "storage",
     SemanticRole.SECURITY:  "security",
     SemanticRole.UNKNOWN:   "misc",
     SemanticRole.RELATION:  None,   # EDGEs are not nodes
 }
 
-# Messaging roles might need splitting into inputs/outputs based on direction (not known at single-node level).
-# For now, we put all messaging middleware in a "messaging" cluster (or distributed if we had topology).
-# To align with L3 template (inputs/outputs), we might need heuristics or just map MESSAGING -> messaging
-# and let D2 layout handle it. Or map to "outputs" by default?
-# Let's stick to "messaging" cluster for SQS/SNS and update template to support it,
-# OR map SQS to inputs if it triggers lambda, outputs if produced.
-# Since we lack topology here, "messaging" is a safe neutral cluster.
+# Assign messaging nodes to a neutral group when direction is unavailable.
 
 
 # Match DLQ queues regardless of separator (dash or underscore) and case.
@@ -167,6 +161,24 @@ class TagResolver:
             graph.components[component_name].add_node(cluster_name, node)
             logger.debug("Resolved NODE: %s -> %s/%s", node.name, component_name, cluster_name)
 
+        # Auto uses the established ECS clustering for ECS components. Lambda-only
+        # views have a generic template, so SNS/Kinesis need not be called queues.
+        if self.pattern == "auto":
+            for comp in graph.components.values():
+                kinds = {n.resource_type for cluster in comp.clusters.values() for n in cluster.nodes}
+                if "lambda" not in kinds or "ecs_service" in kinds:
+                    continue
+                messaging = comp.clusters.get("queues")
+                if messaging:
+                    remaining = []
+                    for node in messaging.nodes:
+                        destination = {"sns": "sns", "kinesis": "streams"}.get(node.resource_type)
+                        if destination:
+                            comp.add_node(destination, node)
+                        else:
+                            remaining.append(node)
+                    messaging.nodes = remaining
+
         logger.info(
             "Resolution complete: %d components, %d orphans",
             len(graph.components),
@@ -253,8 +265,7 @@ class TagResolver:
 
         return None
 
-    # v60 golden: each resource TYPE gets its own dedicated cluster box.
-    # This produces the 6-box layout approved in golden_v60_pn_delivery_L3.d2.
+    # Assign ECS resources to dedicated clusters by resource type.
     _ECS_V60_CLUSTER_MAP: dict[str, str] = {
         "apigw":            "apigw",
         "apigw_v2":         "apigw",
@@ -265,6 +276,11 @@ class TagResolver:
         "lambda":           "lambdas",
         "dynamodb":         "dynamodb",
         "s3":               "storage",
+        "aws_s3tables_tablebucket": "storage",
+        "aws_s3tables_table": "storage",
+        "aws_kinesisfirehose_deliverystream": "queues",
+        "eventbridge_pipe": "queues",
+        "aws_events_eventbus": "rules",
         "sns":              "queues",      # SNS topics are input channels
         "kinesis":          "queues",      # Kinesis streams are input channels
         "step_function":    "lambdas",     # Step Functions are compute workers
@@ -274,9 +290,9 @@ class TagResolver:
         """
         Assign a node to a cluster based on its SemanticRole and the active pattern.
 
-        Pattern "ecs_microservice" (v60 golden layout):
+        Pattern "ecs_microservice":
           Uses ``_ECS_V60_CLUSTER_MAP`` to route each resource TYPE to a dedicated
-          cluster box, producing the 6-box layout:
+          cluster box:
             apigw   → "API Gateway"
             queues  → "SQS Queues"
             rules   → "EventBridge Rules"
@@ -288,7 +304,12 @@ class TagResolver:
         """
         meta = get_resource_meta(node.resource_type, self.meta_overrides)
 
-        # Apply v74 cluster routing for ecs_microservice AND auto (auto defaults to this layout
+        if node.resource_type == "aws_scheduler_schedule":
+            return "rules"
+        if node.resource_type == "aws_apigateway_authorizer":
+            return "security"
+
+        # Apply ECS cluster routing for ecs_microservice and auto (auto defaults to this layout
         # when an ECS service is present, which is the common case for SEND microservices).
         if self.pattern in ("ecs_microservice", "auto"):
             v60_cluster = self._ECS_V60_CLUSTER_MAP.get(node.resource_type)

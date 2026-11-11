@@ -51,7 +51,7 @@ classes: {
 {% if comp.icon %}
   icon: {{ comp.icon }}
 {% endif %}
-  style.fill: "#E8EAF6"
+  style.fill: "{{ service_fill }}"
 }
 {% endfor %}
 

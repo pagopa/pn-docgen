@@ -9,20 +9,9 @@ Default plugin set is selected by ``discovery.cfn_analyzer.mode``:
   - legacy  → split analyzers (storage + microservice paths)
   - hybrid  → both generic and split analyzers
 
-Optional plugins (must be explicitly added):
-  - PomAnalyzer          → pom.xml (internal deps, SQS usage signal)
-
 Usage:
     # Default mode-driven plugins
     analyzer = CfnAnalyzer(repo_path=Path("repo_link/pn-delivery"))
-    analysis = analyzer.analyze()
-
-    # With optional pom plugin
-    from pndocgen.sources.cfn.pom_analyzer import PomAnalyzer
-    analyzer = CfnAnalyzer(
-        repo_path=Path("repo_link/pn-delivery"),
-        extra_plugins=[PomAnalyzer()]
-    )
     analysis = analyzer.analyze()
 
     # Custom plugin set (override defaults)

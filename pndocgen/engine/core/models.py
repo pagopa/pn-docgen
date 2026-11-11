@@ -14,6 +14,7 @@ Contains:
 
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 from typing import Optional
 
 
@@ -128,6 +129,12 @@ DEFAULT_RESOURCE_REGISTRY: dict[str, ResourceMeta] = {
     # --- Storage
     "dynamodb":                         _node(SemanticRole.STORAGE,   "aws-dynamodb"),
     "s3":                               _node(SemanticRole.STORAGE,   "aws-s3"),
+    "aws_s3tables_tablebucket":          _node(SemanticRole.STORAGE,   "aws-s3-tables"),
+    "aws_s3tables_table":                _node(SemanticRole.STORAGE,   "aws-s3-tables"),
+    "aws_s3tables_namespace":            _skip(),
+    "aws_kinesisfirehose_deliverystream": _node(SemanticRole.MESSAGING, "aws-firehose"),
+    "eventbridge_pipe":                 _node(SemanticRole.MESSAGING, "aws-pipes"),
+    "aws_events_eventbus":              _node(SemanticRole.MESSAGING, "aws-eventbridge"),
     "elasticache":                      _node(SemanticRole.STORAGE,   "aws-elasticache"),
     "rds":                              _node(SemanticRole.STORAGE,   "aws-rds"),
     "opensearch":                       _node(SemanticRole.STORAGE,   "aws-opensearch"),
@@ -138,6 +145,11 @@ DEFAULT_RESOURCE_REGISTRY: dict[str, ResourceMeta] = {
     "kinesis":                          _node(SemanticRole.MESSAGING, "aws-kinesis"),
     "eventbridge_rule":                 _node(SemanticRole.MESSAGING, "aws-eventbridge"),
     "eventbridge_bus":                  _node(SemanticRole.MESSAGING, "aws-eventbridge"),
+    # A schedule is a trigger node even when no target binding is available.
+    "aws_scheduler_schedule":           _node(SemanticRole.MESSAGING, "aws-eventbridge"),
+    # API authorization is meaningful; keep it until a verified binding can
+    # replace the configuration node with an explicit authorization relation.
+    "aws_apigateway_authorizer":        _node(SemanticRole.SECURITY, "aws-api-gateway"),
     # --- Ingress / Network
     "apigw":                            _node(SemanticRole.INGRESS,   "aws-api-gateway"),
     "apigw_v2":                         _node(SemanticRole.INGRESS,   "aws-api-gateway"),
@@ -153,8 +165,24 @@ DEFAULT_RESOURCE_REGISTRY: dict[str, ResourceMeta] = {
     # --- Implementation details → excluded from diagrams
     "aws_lambda_layerversion":          _skip(),
     "aws_cloudformation_stack":         _skip(),
+    "aws_apigateway_model":             _skip(),
+    "aws_apigateway_requestvalidator":  _skip(),
+    "aws_apigateway_method":            _skip(),
+    "aws_apigateway_resource":          _skip(),
+    "aws_apigateway_deployment":        _skip(),
+    "aws_apigateway_stage":             _skip(),
+    "aws_s3_bucketpolicy":              _skip(),
+    "aws_sqs_queuepolicy":              _skip(),
 }
 
+
+from pndocgen.engine.core.resource_policy import CFN_SUPPORT_TYPES
+
+# The same support-type policy applies to saved inventories and live discovery.
+for _cfn_type in CFN_SUPPORT_TYPES:
+    DEFAULT_RESOURCE_REGISTRY.setdefault(_cfn_type.lower().replace("::", "_"), _skip())
+DEFAULT_RESOURCE_REGISTRY.setdefault("cloudwatch_alarm", _skip())
+DEFAULT_RESOURCE_REGISTRY.setdefault("log_group", _skip())
 
 # Fallback for any resource_type not in the registry.
 # Defaults to NODE/UNKNOWN so nothing is silently dropped.
@@ -229,14 +257,45 @@ class Edge:
     target: str          # resource name or component name
     edge_type: str       # "sqs_produce" | "sqs_consume" | "http_call"
     label: str = ""      # optional label for the diagram arrow
+    evidence: str = ""   # source of inference; empty for historical inventories
+    source_ref: dict | None = None
+    target_ref: dict | None = None
+    evidence_details: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.source_ref = endpoint_reference(self.source_ref)
+        self.target_ref = endpoint_reference(self.target_ref)
+        if not isinstance(self.evidence_details, dict):
+            raise ValueError('evidence_details must be a mapping')
+        self.evidence_details = json.loads(json.dumps(self.evidence_details, sort_keys=True, allow_nan=False))
 
     def to_dict(self) -> dict:
-        return {
+        result = {
             "source": self.source,
             "target": self.target,
             "type": self.edge_type,
             "label": self.label,
         }
+        if self.evidence:
+            result["evidence"] = self.evidence
+        if self.evidence_details:
+            result["evidence_details"] = self.evidence_details
+        for endpoint in ('source', 'target'):
+            ref = getattr(self, endpoint + '_ref')
+            if ref is not None:
+                result[endpoint + '_ref'] = dict(ref)
+        return result
+
+
+def endpoint_reference(value):
+    """Version-one additive reference contract; old snapshots omit it."""
+    if value is None:
+        return None
+    if (not isinstance(value, dict) or set(value) != {'type', 'id'}
+            or not all(isinstance(v, str) and v for v in value.values())
+            or not value['type'].startswith('AWS::')):
+        raise ValueError(f'Invalid endpoint reference: {value!r}')
+    return {'type': value['type'], 'id': value['id']}
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +305,7 @@ class Edge:
 @dataclass
 class ComponentAnalysis:
     """
-    Result of static analysis of a microservice repository (CFN + pom.xml).
+    Result of static CloudFormation analysis of a microservice repository.
     Produced by cfn_analyzer.py, consumed by tag_resolver.py to enrich the graph.
     """
     name: str                          # e.g. "pn-delivery"
@@ -256,7 +315,7 @@ class ComponentAnalysis:
     http_clients: list = field(default_factory=list)     # microservices called via HTTP (from *BASEURL env vars)
     lambdas: list = field(default_factory=list)          # Lambda function names defined in CFN
     s3_buckets: list = field(default_factory=list)       # S3 buckets owned
-    internal_deps: list = field(default_factory=list)    # pn-* dependencies from pom.xml
+    internal_deps: list = field(default_factory=list)    # Retained for snapshot compatibility.
     metadata: dict = field(default_factory=dict)         # plugin-specific signals (e.g. uses_sqs)
 
     def to_dict(self) -> dict:
@@ -294,6 +353,29 @@ class ComponentCluster:
     nodes: list = field(default_factory=list)  # list[InventoryNode]
 
 
+# Sequenza semantica delle colonne del diagramma: ingresso → code → calcolo → storage.
+CLUSTER_ORDER: tuple[str, ...] = (
+    "apigw", "rules", "sns", "streams", "inputs", "messaging", "queues",
+    "ecs", "compute", "lambdas", "workers",
+    "dynamodb", "storage", "output_queues", "external", "security", "misc",
+)
+
+_CLUSTER_RANK: dict[str, int] = {name: rank for rank, name in enumerate(CLUSTER_ORDER)}
+
+
+def _text_key(value) -> bytes:
+    """Confronto byte-wise, indipendente dal locale."""
+    return str(value or "").encode("utf-8")
+
+
+def _cluster_key(name: str) -> tuple[int, bytes]:
+    return (_CLUSTER_RANK.get(name, len(CLUSTER_ORDER)), _text_key(name))
+
+
+def _node_key(node) -> tuple[bytes, bytes, bytes]:
+    return (_text_key(node.name), _text_key(node.resource_type), _text_key(node.id))
+
+
 @dataclass
 class Component:
     """
@@ -313,6 +395,15 @@ class Component:
     def get_cluster(self, name: str) -> ComponentCluster:
         return self.clusters.get(name, ComponentCluster(name=name))
 
+    def canonicalize(self) -> None:
+        """Ordina i cluster nella sequenza dichiarata e i nodi per nome."""
+        for cluster in self.clusters.values():
+            cluster.nodes.sort(key=_node_key)
+        self.clusters = {
+            name: self.clusters[name]
+            for name in sorted(self.clusters, key=_cluster_key)
+        }
+
     def to_dict(self) -> dict:
         """Serialize to JSON-compatible dict (for component_graph.json)."""
         result = {
@@ -320,7 +411,8 @@ class Component:
             "account": self.account,
             "clusters": {
                 cluster_name: [
-                    {"id": n.id, "name": n.name, "type": n.resource_type}
+                    {"id": n.id, "name": n.name, "type": n.resource_type,
+                     **({'metadata': label_metadata(n.metadata)} if label_metadata(n.metadata) else {})}
                     for n in cluster.nodes
                 ]
                 for cluster_name, cluster in self.clusters.items()
@@ -329,6 +421,35 @@ class Component:
         if self.analysis:
             result["analysis"] = self.analysis.to_dict()
         return result
+
+
+def label_metadata(metadata: dict) -> dict:
+    """Preserve versioned display provenance and explicit identity metadata.
+
+    Do not serialize arbitrary inventory metadata or alter old graph files.
+    The renderer validates the logical path before using it for presentation.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+    result = {}
+    if metadata.get('cfn_provenance') == 'stack_membership_v1':
+        result.update({key: metadata[key] for key in ('cfn_provenance', 'cfn_logical_path', 'logical_id', 'cfn_type')
+                       if key in metadata})
+    if metadata.get('resource_identity') is not None:
+        result['resource_identity'] = endpoint_reference(metadata['resource_identity'])
+        for key in ('external_reference', 'discovered_from'):
+            if key in metadata:
+                result[key] = metadata[key]
+    for key, fields in (
+        ('eventbridge_rule', ('EventBusName', 'State', 'EventPattern', 'ScheduleExpression')),
+        ('eventbridge_pipe', ('CurrentState', 'DesiredState', 'Source', 'Target')),
+    ):
+        context = metadata.get(key)
+        if context is not None:
+            if not isinstance(context, dict):
+                raise ValueError(f'Invalid {key} metadata')
+            result[key] = {field: context[field] for field in fields if field in context}
+    return result
 
 
 @dataclass
@@ -346,6 +467,51 @@ class ComponentGraph:
 
     def add_edge(self, edge: Edge):
         self.edges.append(edge)
+
+    def canonicalize(self) -> None:
+        """Impone un ordine totale su componenti, cluster, nodi e archi.
+
+        Senza questo passaggio due discovery identiche producono diagrammi diversi,
+        perché l'ordine eredita quello delle risposte delle API AWS.
+        """
+        for component in self.components.values():
+            component.canonicalize()
+        self.components = {
+            name: self.components[name]
+            for name in sorted(self.components, key=_text_key)
+        }
+
+        cluster_of: dict[str, str] = {
+            node.name: cluster_name
+            for component in self.components.values()
+            for cluster_name, cluster in component.clusters.items()
+            for node in cluster.nodes
+        }
+
+        def identity(edge: Edge) -> tuple:
+            return (
+                _text_key(edge.source),
+                _text_key(edge.target),
+                _text_key(edge.edge_type),
+                _text_key(edge.label),
+                _text_key(edge.evidence),
+                json.dumps(edge.source_ref, sort_keys=True),
+                json.dumps(edge.target_ref, sort_keys=True),
+                json.dumps(edge.evidence_details, sort_keys=True),
+            )
+
+        def edge_key(edge: Edge) -> tuple:
+            return (
+                _cluster_key(cluster_of.get(edge.source, "")),
+                _cluster_key(cluster_of.get(edge.target, "")),
+                *identity(edge),
+            )
+
+        unique: dict[tuple, Edge] = {}
+        for edge in self.edges:
+            unique.setdefault(identity(edge), edge)
+        self.edges = sorted(unique.values(), key=edge_key)
+        self.orphans.sort(key=_node_key)
 
     def to_dict(self) -> dict:
         return {

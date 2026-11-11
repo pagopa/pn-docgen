@@ -22,6 +22,7 @@ Why this is better than static CFN analysis:
 """
 
 import logging
+import fnmatch
 from typing import Optional
 
 import boto3
@@ -29,6 +30,24 @@ import boto3
 from pndocgen.engine.core.config import AppConfig, get_app_config
 
 logger = logging.getLogger(__name__)
+
+
+def _paged_items(client, operation: str, result_key: str, **params):
+    """Use SDK paginator contracts instead of silently truncating AWS results."""
+    for page in client.get_paginator(operation).paginate(**params):
+        yield from page.get(result_key, [])
+
+
+def _lambda_name(identifier: str) -> str:
+    """Function identity, excluding any version/alias qualifier."""
+    if ":function:" in identifier:
+        return identifier.split(":function:", 1)[1].split(":", 1)[0]
+    return identifier.split(":", 1)[0]
+
+
+def _statements(document):
+    statements = document.get("Statement", [])
+    return [statements] if isinstance(statements, dict) else statements
 
 # CFN resource types we care about (captured during stack walk).
 # Note: _process_stack captures ALL resources regardless of this set.
@@ -54,36 +73,9 @@ _RESOURCE_TYPES = {
 # CFN resource types that are infrastructure noise for architecture diagrams.
 # Override via pndocgen.yaml (cfn.skip_types) or --skip-types CLI flag.
 # Pass frozenset() to include everything.
-DEFAULT_SKIP_TYPES: frozenset = frozenset({
-    "AWS::CloudWatch::Alarm",
-    "AWS::Logs::LogGroup",
-    "AWS::Logs::MetricFilter",
-    "AWS::Logs::SubscriptionFilter",
-    "AWS::KMS::Key",
-    "AWS::KMS::Alias",
-    "AWS::IAM::Role",
-    "AWS::IAM::Policy",
-    "AWS::IAM::ManagedPolicy",
-    "AWS::Lambda::Permission",
-    "AWS::Lambda::Version",
-    "AWS::Lambda::Alias",
-    "AWS::Lambda::EventInvokeConfig",
-    "AWS::ApplicationAutoScaling::ScalableTarget",
-    "AWS::ApplicationAutoScaling::ScalingPolicy",
-    "AWS::EC2::SecurityGroup",
-    "AWS::ECS::TaskDefinition",
-    "AWS::ApiGateway::Deployment",
-    "AWS::ApiGateway::Stage",
-    "AWS::ApiGateway::BasePathMapping",
-    "AWS::WAFv2::LoggingConfiguration",
-    "AWS::WAFv2::WebACLAssociation",
-    "AWS::WAFv2::IPSet",
-    "AWS::SQS::QueuePolicy",
-    "AWS::ElasticLoadBalancingV2::ListenerRule",
-    "AWS::EFS::AccessPoint",
-    "AWS::Glue::Table",
-    "AWS::CloudWatch::Dashboard",
-})
+from pndocgen.engine.core.resource_policy import CFN_SUPPORT_TYPES
+
+DEFAULT_SKIP_TYPES = CFN_SUPPORT_TYPES
 
 
 import re as _re
@@ -184,6 +176,14 @@ def _normalize_name(physical_id: str, cfn_type: str, logical_id: str) -> str:
     """
     pid = physical_id
 
+    if cfn_type in {'AWS::KinesisFirehose::DeliveryStream', 'AWS::S3Tables::TableBucket'}:
+        return pid.rsplit('/', 1)[-1]
+    if cfn_type == 'AWS::S3Tables::Table':
+        return logical_id or pid
+
+    if cfn_type == "AWS::Lambda::Function":
+        return _lambda_name(pid)
+
     # --- ECS Service ARN: arn:aws:ecs:region:account:service/cluster/service-name
     if cfn_type == "AWS::ECS::Service" and pid.startswith("arn:aws:ecs:"):
         parts = pid.split("/")
@@ -268,6 +268,11 @@ class CfnLiveDiscoverer:
         max_nested_depth: int = 3,
         app_config: Optional[AppConfig] = None,
     ):
+        self._session = session
+        self.dataflow_links: list[dict] = []
+        self.dataflow_descriptions: dict = {}
+        self.dataflow_scopes: set[tuple[str, str, str]] = set()
+        self.eventbridge_publish_permissions: list[dict] = []
         self.cfn = session.client("cloudformation", region_name=region)
         self.lmb = session.client("lambda", region_name=region)
         self.ecs = session.client("ecs", region_name=region)
@@ -279,6 +284,7 @@ class CfnLiveDiscoverer:
         self.max_nested_depth = max_nested_depth
         self.region = region
         self._app_config = app_config or get_app_config()
+        self.issues: list[dict] = []
 
         # Built by discover(): physical_resource_id -> component_name
         self.resource_map: dict[str, str] = {}
@@ -286,9 +292,12 @@ class CfnLiveDiscoverer:
         self.component_resources: dict[str, list[dict]] = {}
         # SQS consumer edges: lambda_arn -> queue_url
         self.lambda_sqs_triggers: list[dict] = []
-        # ECS HTTP client edges: component -> [target_component]
+        self.lambda_sqs_consumers: dict[str, list[str]] = {}
+        self.lambda_sqs_producers: dict[str, list[str]] = {}
+        # ECS HTTP client edges: service ARN -> [target_component]. Legacy
+        # component keys remain supported only for uniquely owned ECS services.
         self.ecs_http_clients: dict[str, list[str]] = {}
-        # ECS SQS consumer edges: component -> [queue_name]
+        # ECS SQS consumer edges: service ARN -> [queue_name]
         # Populated by _enrich_ecs_env_vars() by scanning env var VALUES for SQS URLs.
         # ECS polls queues via application code (no AWS EventSourceMapping),
         # so the only discovery path is via task definition environment variables.
@@ -299,6 +308,8 @@ class CfnLiveDiscoverer:
         # Reverse lookup: raw_queue_name (last segment of URL or ARN) → normalized_name
         # Populated by to_inventory_nodes() so to_edges() can resolve IAM ARN queue names.
         self._queue_rawname_to_norm: dict[str, str] = {}
+        self._resource_aliases: dict[tuple[str, str], set[str]] = {}
+        self._ecs_component_names: dict[str, set[str]] = {}
         # Lambda execution role IAM scan → storage access edges
         # Maps lambda_fn_name → list of storage resource names (DynamoDB table, S3 bucket)
         self.lambda_storage_access: dict[str, list[str]] = {}
@@ -309,10 +320,10 @@ class CfnLiveDiscoverer:
         # List of {"apigw_name": ..., "lambda_name": ...}
         self.apigw_lambda_edges: list[dict] = []
         # ECS task role IAM scan → storage access edges (DynamoDB/S3)
-        # Maps ecs_component_name → list of storage resource names
+        # Maps service ARN → list of storage resource names
         self.ecs_storage_access: dict[str, list[str]] = {}
         # Storage access mode per ECS/resource inferred from IAM actions.
-        # ecs_component_name -> resource_name -> {"read", "write"}
+        # service ARN -> resource_name -> {"read", "write"}
         self.ecs_storage_modes: dict[str, dict[str, set[str]]] = {}
         # EventBridge Rules → ECS edges (from events:ListTargetsByRule)
         # List of {"rule_name": ..., "ecs_component": ..., "component": ...}
@@ -329,7 +340,8 @@ class CfnLiveDiscoverer:
         # DynamoDB Stream → Lambda edges (EventSourceMapping, :dynamodb: source)
         # List of {"lambda_arn": ..., "table_arn": ..., "component": ...}
         self.lambda_dynamodb_triggers: list[dict] = []
-        # ECS SQS producer edges (sqs:SendMessage IAM actions) — component → [queue_name]
+        self.lambda_kinesis_triggers: list[dict] = []
+        # ECS SQS producer edges (sqs:SendMessage IAM actions): service ARN -> queues
         self.ecs_sqs_producers: dict[str, list[str]] = {}
         # SNS fan-out edges: SNS topic → SQS queue / Lambda function
         # List of {"source_topic": ..., "target": ..., "target_type": "sqs"|"lambda"}
@@ -342,6 +354,69 @@ class CfnLiveDiscoverer:
         # physical_id for AWS::ApiGateway::RestApi is just the API ID (e.g. "dil41w79vb")
         # which _normalize_name() can't resolve. This dict provides the real name.
         self.apigw_real_names: dict[str, str] = {}
+
+    def _record_issue(self, stage: str, resource: str, error) -> None:
+        issue = {"stage": stage, "resource": resource, "error": str(error)}
+        if issue not in self.issues:
+            self.issues.append(issue)
+        logger.warning("[cfn-live] Partial discovery: %s for %s: %s", stage, resource, error)
+
+    def _edge_resource_name(self, cfn_type: str, identifier: str) -> str:
+        names = self._resource_aliases.get((cfn_type, identifier), set())
+        if len(names) > 1:
+            raise ValueError(f"Ambiguous relationship endpoint: {cfn_type} {identifier}")
+        return next(iter(names), identifier)
+
+    def _queue_fields(self, identifier: str, endpoint: str) -> dict:
+        """Keep concrete scope while projecting a queue onto its registered name."""
+        from pndocgen.sources.aws.resource_identity import sqs_reference
+        ref = sqs_reference(identifier)
+        if not ref:
+            return {endpoint: self._queue_rawname_to_norm.get(identifier, identifier)}
+        identity = ref['id']
+        name = self._edge_resource_name('AWS::SQS::Queue', identity)
+        if name == identity:
+            raw = identity.rsplit(':', 1)[-1]
+            # A known namesake is not evidence of identity across account/region.
+            name = identity if ('AWS::SQS::Queue', raw) in self._resource_aliases else raw
+        return {endpoint: name, endpoint + '_ref': ref}
+
+    def _ecs_endpoint(self, component: str) -> str:
+        """Resolve exact service identities; keep legacy component inference guarded."""
+        if component.startswith("arn:"):
+            identifier = component
+            names = self._resource_aliases.get(("AWS::ECS::Service", identifier), set())
+            if len(names) == 1:
+                return next(iter(names))
+            # Some legacy callers serialize before converting inventory nodes.
+            component = self.resource_map.get(identifier, "")
+            if not component or len(self._ecs_identities(component)) != 1:
+                raise ValueError(f"Unresolved ECS service identity: {identifier}")
+        names = self._ecs_component_names.get(component, set())
+        if len(names) > 1 or (not names and len(self._ecs_identities(component)) > 1):
+            raise ValueError(f"Ambiguous ECS owner in {component}: {sorted(names)}")
+        return next(iter(names), component)
+
+    def _ecs_identities(self, component: str) -> set[str]:
+        return {r["physical_id"] for r in self.component_resources.get(component, [])
+                if r.get("type") == "AWS::ECS::Service" and r.get("physical_id")}
+
+    def _multi_ecs_names(self, component: str) -> dict[str, str]:
+        """Keep real service names, qualified by cluster when necessary.
+
+        Repeated nested-stack logical IDs are not identities. No order-based
+        suffixes or deployment-specific name parsing. Names are stable for a
+        given capture, not necessarily across resource replacements.
+        """
+        identities = self._ecs_identities(component)
+        if len(identities) < 2:
+            return {}
+        names = {pid: pid.rsplit("/", 1)[-1] for pid in identities}
+        if len(set(names.values())) != len(names):
+            names = {pid: pid.split(":service/", 1)[-1] for pid in identities}
+        if len(set(names.values())) != len(names):
+            names = {pid: pid for pid in identities}
+        return names
 
     def discover(self, component_filter: Optional[str] = None) -> None:
         """
@@ -370,6 +445,8 @@ class CfnLiveDiscoverer:
         self._enrich_eventbridge_targets()
         self._enrich_apigw_ecs()
         self._enrich_sns_subscriptions()
+        from pndocgen.sources.aws.dataflows import enrich
+        enrich(self, self._session)
 
         logger.info(
             "[cfn-live] Discovery complete: %d resources across %d components",
@@ -411,6 +488,7 @@ class CfnLiveDiscoverer:
             "AWS::StepFunctions::StateMachine": "step_function",
             "AWS::Kinesis::Stream": "kinesis",
             "AWS::Events::Rule": "eventbridge_rule",
+            "AWS::Scheduler::Schedule": "aws_scheduler_schedule",
             "AWS::ElasticLoadBalancingV2::LoadBalancer": "alb",
             "AWS::ElasticLoadBalancingV2::TargetGroup": "target_group",
             "AWS::ApiGateway::RestApi": "apigw",
@@ -420,10 +498,15 @@ class CfnLiveDiscoverer:
             "AWS::Pipes::Pipe": "eventbridge_pipe",
         }
 
-        seen_ids: set[str] = set()
-        seen_names: set[tuple[str, str]] = set()   # (component, name) dedup for opaque IDs
+        seen_ids: set[tuple[str, str]] = set()
+        seen_names: dict[tuple[str, str], tuple[str, str]] = {}
         nodes = []
         for component, resources in self.component_resources.items():
+            from pndocgen.sources.aws.cfn_provenance import logical_paths
+            provenance, provenance_issues = logical_paths(resources)
+            for issue in provenance_issues:
+                self._record_issue('ambiguous_cfn_provenance', issue['resource'], issue['reason'])
+            multi_ecs_names = self._multi_ecs_names(component)
             for res in resources:
                 physical_id = res["physical_id"]
                 cfn_type = res.get("type", "")
@@ -434,10 +517,11 @@ class CfnLiveDiscoverer:
                     continue
                 if cfn_type in skip_cfn_types:
                     continue
-                if physical_id in seen_ids:
+                identity = (cfn_type, physical_id)
+                if identity in seen_ids:
                     continue
 
-                seen_ids.add(physical_id)
+                seen_ids.add(identity)
 
                 resource_type = _TYPE_MAP.get(cfn_type, cfn_type.lower().replace("::", "_"))
                 name = _normalize_name(physical_id, cfn_type, logical_id)
@@ -454,8 +538,11 @@ class CfnLiveDiscoverer:
                 # (e.g. "pn-delivery-microsvc-dev-DeliveryMicroservice-XYZ-ECSService-ABC").
                 # Replace with the component name, which is the human-readable service name
                 # (e.g. "pn-delivery").
-                if cfn_type == "AWS::ECS::Service" and "-ECSService-" in name:
-                    name = component
+                if cfn_type == "AWS::ECS::Service":
+                    if multi_ecs_names:
+                        name = multi_ecs_names[physical_id]
+                    elif "-ECSService-" in name:
+                        name = component
 
                 # Any resource whose normalized name still contains an env-stage token
                 # (e.g. "-dev-", "-prod-") is still opaque / CFN-generated.
@@ -463,7 +550,8 @@ class CfnLiveDiscoverer:
                 # This covers SQS queues, EventBridge rules/pipes, and any other resource
                 # type where _normalize_name didn't fully clean the physical_id.
                 env_tokens = ("-dev-", "-prod-", "-staging-", "-uat-")
-                if logical_id and (cfn_type == "AWS::Pipes::Pipe" or any(tok in name for tok in env_tokens)):
+                if (logical_id and not (cfn_type == "AWS::ECS::Service" and multi_ecs_names)
+                        and (cfn_type == "AWS::Pipes::Pipe" or any(tok in name for tok in env_tokens))):
                     import re as _re2
                     # Convert PascalCase logical_id → kebab-case
                     # e.g. "PnDeliveryLimitConfigurerQueue" → "pn-delivery-limit-configurer-queue"
@@ -476,9 +564,17 @@ class CfnLiveDiscoverer:
                 # (e.g. 3 API GW RestApi entries all resolving to "PublicRestApiOpenapi")
                 name_key = (component, name)
                 if name_key in seen_names:
-                    continue
-                seen_names.add(name_key)
+                    raise ValueError(
+                        f"Ambiguous resource name in {component}: {name}; distinct physical identities: "
+                        f"{seen_names[name_key]!r} versus {identity!r}")
+                seen_names[name_key] = identity
+                if cfn_type == "AWS::ECS::Service":
+                    self._ecs_component_names.setdefault(component, set()).add(name)
+                for alias in {physical_id, physical_id.split(":")[-1].split("/")[-1],
+                              _normalize_name(physical_id, cfn_type, logical_id), name}:
+                    self._resource_aliases.setdefault((cfn_type, alias), set()).add(name)
 
+                from pndocgen.sources.aws.event_context import metadata as event_metadata
                 nodes.append(InventoryNode(
                     id=physical_id,
                     name=name,
@@ -490,8 +586,17 @@ class CfnLiveDiscoverer:
                         "component": component,
                         "logical_id": logical_id,
                         "cfn_type": cfn_type,
+                        **event_metadata(self, cfn_type, physical_id),
+                        **({'cfn_provenance': 'stack_membership_v1',
+                            'cfn_logical_path': provenance[identity]} if identity in provenance else {}),
                     }
                 ))
+
+                # Register only scoped Lambda identities derived from captured metadata.
+                if cfn_type == 'AWS::Lambda::Function':
+                    ref = nodes[-1].metadata.get('resource_identity')
+                    if ref:
+                        self._resource_aliases.setdefault((cfn_type, ref['id']), set()).add(name)
 
                 # Build reverse map for SQS: raw URL name → normalized name.
                 # This is needed in to_edges() to resolve IAM policy ARN queue names
@@ -500,6 +605,10 @@ class CfnLiveDiscoverer:
                 if cfn_type == "AWS::SQS::Queue":
                     raw_url_name = physical_id.rstrip("/").split("/")[-1]
                     self._queue_rawname_to_norm[raw_url_name] = name
+                    from pndocgen.sources.aws.resource_identity import sqs_identity
+                    queue_identity = sqs_identity(physical_id)
+                    if queue_identity:
+                        self._resource_aliases.setdefault((cfn_type, queue_identity), set()).add(name)
 
         logger.info(
             "[cfn-live] Converted to %d InventoryNodes (deduped from %d raw)",
@@ -527,10 +636,9 @@ class CfnLiveDiscoverer:
 
         # 1. SQS → Lambda (EventSourceMapping)
         for t in self.lambda_sqs_triggers:
-            queue_name = t["queue_arn"].split(":")[-1].split("/")[-1]
-            lambda_name = t["lambda_arn"].split(":")[-1]
+            lambda_name = _lambda_name(t["lambda_arn"])
             edges.append({
-                "source": queue_name,
+                **self._queue_fields(t['queue_arn'], 'source'),
                 "target": lambda_name,
                 "type": "sqs_trigger",
                 "label": "triggers",
@@ -538,17 +646,26 @@ class CfnLiveDiscoverer:
 
         # 1b. DynamoDB Stream → Lambda (EventSourceMapping, :dynamodb: source)
         # Stream ARN format: arn:aws:dynamodb:region:account:table/TableName/stream/TIMESTAMP
-        # We extract the table name from after "/table/" and before the next "/".
+        # Use the same ARN parser as IAM table/index references.
         for t in self.lambda_dynamodb_triggers:
             raw_arn = t["table_arn"]
-            table_name = raw_arn.split("/table/")[-1].split("/")[0] if "/table/" in raw_arn else raw_arn.split("/")[-1]
-            lambda_name = t["lambda_arn"].split(":")[-1]
+            table_name = _extract_dynamodb_table_name(raw_arn)
+            if not table_name:
+                logger.warning("Skipping DynamoDB stream edge: table name could not be resolved")
+                continue
+            lambda_name = _lambda_name(t["lambda_arn"])
             edges.append({
                 "source": table_name,
                 "target": lambda_name,
                 "type": "dynamodb_stream",
                 "label": "stream",
             })
+
+        for mapping in self.lambda_kinesis_triggers:
+            arn = mapping["stream_arn"]
+            stream = arn.split(":stream/", 1)[-1]
+            edges.append({"source": stream, "target": _lambda_name(mapping["lambda_arn"]),
+                          "type": "kinesis_trigger", "label": "stream"})
 
         # 2. SQS → ECS (IAM policy ReceiveMessage — ECS polls the queue)
         # IAM ARNs contain raw CFN queue names (e.g. "pn-delivery-microsvc-dev-PnDelivery...").
@@ -557,10 +674,11 @@ class CfnLiveDiscoverer:
         for ecs_component, queue_names in self.ecs_sqs_consumers.items():
             for raw_name in set(queue_names):
                 # Resolve raw CFN name → normalized human-readable name
-                norm_name = self._queue_rawname_to_norm.get(raw_name, raw_name)
+                queue_fields = self._queue_fields(raw_name, 'source')
+                norm_name = queue_fields['source']
                 edges.append({
-                    "source": norm_name,
-                    "target": ecs_component,
+                    **queue_fields,
+                    "target": self._ecs_endpoint(ecs_component),
                     "type": "sqs_consumer",
                     "label": "consumes",
                 })
@@ -570,10 +688,11 @@ class CfnLiveDiscoverer:
         # 2b. ECS → SQS (IAM policy SendMessage — ECS writes to queue)
         for ecs_component, queue_names in self.ecs_sqs_producers.items():
             for raw_name in set(queue_names):
-                norm_name = self._queue_rawname_to_norm.get(raw_name, raw_name)
+                queue_fields = self._queue_fields(raw_name, 'target')
+                norm_name = queue_fields['target']
                 edges.append({
-                    "source": ecs_component,
-                    "target": norm_name,
+                    "source": self._ecs_endpoint(ecs_component),
+                    **queue_fields,
                     "type": "sqs_producer",
                     "label": "produces",
                 })
@@ -584,7 +703,7 @@ class CfnLiveDiscoverer:
         for source_comp, targets in self.ecs_http_clients.items():
             for target_comp in set(targets):
                 edges.append({
-                    "source": source_comp,
+                    "source": self._ecs_endpoint(source_comp),
                     "target": target_comp,
                     "type": "http_call",
                     "label": "HTTP",
@@ -599,6 +718,7 @@ class CfnLiveDiscoverer:
                     "target": res_name,
                     "type": "storage_access",
                     "label": _storage_label_from_modes(modes),
+                    "evidence": "iam_permission",
                 })
 
         # 4b. ECS → storage resources (DynamoDB, S3) from IAM task role
@@ -606,7 +726,7 @@ class CfnLiveDiscoverer:
             for res_name in set(storage_names):
                 modes = self.ecs_storage_modes.get(ecs_comp, {}).get(res_name, set())
                 edges.append({
-                    "source": ecs_comp,
+                    "source": self._ecs_endpoint(ecs_comp),
                     "target": res_name,
                     "type": "storage_access",
                     "label": _storage_label_from_modes(modes),
@@ -619,13 +739,15 @@ class CfnLiveDiscoverer:
                 "target": edge["lambda_name"],
                 "type": "apigw_integration",
                 "label": "",
+                "evidence": "lambda_resource_policy_permission",
             })
 
         # 6. EventBridge Rule → ECS (from events:ListTargetsByRule)
         for edge in self.eventbridge_ecs_edges:
             edges.append({
                 "source": edge["rule_name"],
-                "target": edge["ecs_component"],
+                'source_ref': {'type': 'AWS::Events::Rule', 'id': edge['rule_name']},
+                "target": self._ecs_endpoint(edge["ecs_component"]),
                 "type": "eventbridge_trigger",
                 "label": "triggers",
             })
@@ -634,7 +756,10 @@ class CfnLiveDiscoverer:
         for edge in self.eventbridge_lambda_edges:
             edges.append({
                 "source": edge["rule_name"],
+                'source_ref': {'type': 'AWS::Events::Rule', 'id': edge['rule_name']},
                 "target": edge["lambda_name"],
+                **({'target_ref': {'type': 'AWS::Lambda::Function', 'id': edge['target_arn']}}
+                   if edge.get('target_arn') else {}),
                 "type": "eventbridge_trigger",
                 "label": "triggers",
             })
@@ -643,29 +768,94 @@ class CfnLiveDiscoverer:
         for edge in self.eventbridge_sqs_edges:
             edges.append({
                 "source": edge["rule_name"],
-                "target": edge["queue_name"],
+                'source_ref': {'type': 'AWS::Events::Rule', 'id': edge['rule_name']},
+                **self._queue_fields(edge.get('queue_arn', edge['queue_name']), 'target'),
                 "type": "eventbridge_trigger",
                 "label": "triggers",
+                "evidence": edge.get("evidence", "eventbridge_target_configuration"),
             })
 
         # 7. API Gateway → ECS (via ALB TargetGroup)
         for edge in self.apigw_ecs_edges:
             edges.append({
                 "source": edge["apigw_name"],
-                "target": edge["ecs_component"],
+                "target": self._ecs_endpoint(edge["ecs_component"]),
                 "type": "apigw_integration",
                 "label": "",
+                "evidence": "same_component_heuristic",
             })
 
         # 8. SNS Topic → SQS queue / Lambda (subscription)
         for edge in self.sns_edges:
             edges.append({
                 "source": edge["source_topic"],
-                "target": edge["target"],
+                **(self._queue_fields(edge.get('target_arn', edge['target']), 'target')
+                   if edge.get('target_type') == 'sqs' else {
+                       'target': edge['target'],
+                       **({'target_ref': {'type': 'AWS::Lambda::Function', 'id': edge['target_arn']}}
+                          if edge.get('target_arn') else {})}),
                 "type": "sns_subscription",
                 "label": "fan-out",
             })
 
+        for producer, queues in self.lambda_sqs_producers.items():
+            for queue in sorted(set(queues)):
+                edges.append({"source": producer, **self._queue_fields(queue, 'target'),
+                              "type": "sqs_producer", "label": "produces"})
+        for consumer, queues in self.lambda_sqs_consumers.items():
+            for queue in sorted(set(queues)):
+                edges.append({**self._queue_fields(queue, 'source'), "target": consumer,
+                              "type": "sqs_consumer", "label": "consumes"})
+        # Queue aliases are shared by all relation sources, not just ECS IAM.
+        for edge in edges:
+            edge.setdefault("evidence", {
+                "sqs_trigger": "event_source_mapping_configuration",
+                "dynamodb_stream": "event_source_mapping_configuration",
+                "kinesis_trigger": "event_source_mapping_configuration",
+                "sqs_consumer": "iam_permission",
+                "sqs_producer": "iam_permission",
+                "http_call": "environment_reference",
+                "storage_access": "iam_or_environment_reference",
+                "eventbridge_trigger": "eventbridge_target_configuration",
+                "sns_subscription": "sns_subscription_configuration",
+            }.get(edge["type"], "unknown"))
+            kind = edge["type"]
+            source_types = {"sqs_trigger": "SQS::Queue", "sqs_consumer": "SQS::Queue",
+                            "dynamodb_stream": "DynamoDB::Table", "kinesis_trigger": "Kinesis::Stream",
+                            "sns_subscription": "SNS::Topic", "eventbridge_trigger": "Events::Rule",
+                            "apigw_integration": "ApiGateway::RestApi"}
+            if kind in source_types:
+                edge["source"] = self._edge_resource_name("AWS::" + source_types[kind], edge["source"])
+            # Identity aliases reconcile CFN display names with relationship ARNs.
+            for endpoint in ("source", "target"):
+                edge[endpoint] = self._edge_resource_name("AWS::Lambda::Function", edge[endpoint])
+            if edge["type"] in {"sqs_trigger", "sqs_consumer"}:
+                edge["source"] = self._queue_rawname_to_norm.get(edge["source"], edge["source"])
+            if edge["type"] in {"sqs_producer", "sns_subscription", "eventbridge_trigger"}:
+                edge["target"] = self._queue_rawname_to_norm.get(edge["target"], edge["target"])
+            for endpoint in ('source', 'target'):
+                ref = edge.get(endpoint + '_ref')
+                if ref and ref['type'] == 'AWS::SQS::Queue':
+                    edge.update(self._queue_fields(ref['id'], endpoint))
+        from pndocgen.sources.aws.dataflows import resolved_links
+        edges.extend(resolved_links(self))
+        for permission in self.eventbridge_publish_permissions:
+            edge = {k: v for k, v in permission.items() if k != 'source_type'}
+            edge['source'] = (self._ecs_endpoint(permission['source']) if permission['source_type'] == 'ecs'
+                              else self._edge_resource_name('AWS::Lambda::Function', permission['source']))
+            edge['target'] = self._edge_resource_name('AWS::Events::EventBus', permission['target'])
+            edges.append(edge)
+        from pndocgen.sources.aws.resource_identity import lambda_identity
+        for edge in edges:
+            for endpoint in ('source', 'target'):
+                ref = edge.get(endpoint + '_ref')
+                if ref and ref.get('type') == 'AWS::Lambda::Function':
+                    identity = lambda_identity(ref.get('id'))
+                    if identity:
+                        names = self._resource_aliases.get(('AWS::Lambda::Function', identity), set())
+                        if len(names) > 1:
+                            raise ValueError(f'Ambiguous Lambda identity reference: {identity}')
+                        edge[endpoint] = next(iter(names), ref['id'])
         return edges
 
     def _register_lambda_storage_access(
@@ -719,6 +909,9 @@ class CfnLiveDiscoverer:
         ):
             for resource in page.get("ResourceTagMappingList", []):
                 arn = resource["ResourceARN"]
+                arn_parts = arn.split(':', 5)
+                if len(arn_parts) == 6:
+                    self.dataflow_scopes.add((arn_parts[1], arn_parts[3], arn_parts[4]))
                 tags = {t["Key"]: t["Value"] for t in resource.get("Tags", [])}
                 component = tags.get(self.tag_key, "")
                 if not component:
@@ -733,7 +926,7 @@ class CfnLiveDiscoverer:
     def _process_stack(self, stack_name: str, component: str, depth: int) -> None:
         """Recursively process a stack and its nested stacks."""
         if depth > self.max_nested_depth:
-            logger.warning("[cfn-live] Max nested depth reached for %s", stack_name)
+            self._record_issue("nested_stack_depth", stack_name, "maximum configured depth exceeded")
             return
 
         # Skip if already visited — happens when Resource Groups Tagging API returns
@@ -760,6 +953,7 @@ class CfnLiveDiscoverer:
                         "physical_id": physical_id,
                         "logical_id": logical_id,
                         "type": res_type,
+                        "stack_name": stack_name,
                     })
 
                     # Recurse into nested stacks (ARN or name)
@@ -768,7 +962,7 @@ class CfnLiveDiscoverer:
                         self._process_stack(nested_name, component, depth + 1)
 
         except Exception as e:
-            logger.warning("[cfn-live] Cannot list resources for %s: %s", stack_name, e)
+            self._record_issue("list_stack_resources", stack_name, e)
 
     # ------------------------------------------------------------------
     # Relationship enrichment (read-only)
@@ -807,7 +1001,7 @@ class CfnLiveDiscoverer:
                     self.apigw_real_names[api_id] = real_name
                     logger.debug("[cfn-live] API GW real name: %s -> %r", api_id, real_name)
             except Exception as e:
-                logger.debug("[cfn-live] Cannot get name for API %s: %s", api_id, e)
+                self._record_issue("get_rest_api", api_id, e)
 
         logger.info(
             "[cfn-live] API GW name enrichment complete: %d names resolved",
@@ -834,8 +1028,7 @@ class CfnLiveDiscoverer:
         logger.info("[cfn-live] Enriching triggers for %d Lambda functions", len(lambda_entries))
         for fn_name, component in lambda_entries:
             try:
-                resp = self.lmb.list_event_source_mappings(FunctionName=fn_name)
-                for mapping in resp.get("EventSourceMappings", []):
+                for mapping in _paged_items(self.lmb, "list_event_source_mappings", "EventSourceMappings", FunctionName=fn_name):
                     event_source = mapping.get("EventSourceArn", "")
                     if ":sqs:" in event_source:
                         self.lambda_sqs_triggers.append({
@@ -851,8 +1044,14 @@ class CfnLiveDiscoverer:
                             "component": component,
                         })
                         logger.debug("[cfn-live] DynamoDB stream trigger: %s <- %s", fn_name, event_source)
+                    elif ":kinesis:" in event_source and ":stream/" in event_source:
+                        self.lambda_kinesis_triggers.append({"lambda_arn": fn_name,
+                                                             "stream_arn": event_source, "component": component})
+                    else:
+                        self._record_issue("unsupported_event_source", fn_name,
+                                           "Event source mapping type is not supported")
             except Exception as e:
-                logger.debug("[cfn-live] Cannot get triggers for %s: %s", fn_name, e)
+                self._record_issue("list_event_source_mappings", fn_name, e)
 
     def _enrich_ecs_env_vars(self) -> None:
         """
@@ -872,19 +1071,6 @@ class CfnLiveDiscoverer:
         _ecs_cfg = self._app_config.discovery.ecs_dependencies
         _env_regex = _ecs_cfg.env_regex or r"PN_[A-Z]+_([A-Z_]+?)(?:BASE_URL|BASEURL)$"
         _RE_BASEURL = re.compile(_env_regex, re.IGNORECASE)
-
-        # SQS actions that indicate a consumer relationship (ECS reads from queue)
-        _SQS_CONSUMER_ACTIONS = frozenset({
-            "sqs:receivemessage",
-            "sqs:deletemessage",
-            "sqs:changemessagevisibility",
-            "sqs:getqueueattributes",
-            "sqs:getqueueurl",
-        })
-        # SQS actions that indicate a producer relationship (ECS sends to queue)
-        _SQS_PRODUCER_ACTIONS = frozenset({
-            "sqs:sendmessage",
-        })
 
         _DYNAMO_READ_ACTIONS = frozenset({
             "dynamodb:getitem",
@@ -967,6 +1153,10 @@ class CfnLiveDiscoverer:
                 owned_buckets = component_buckets_by_name.get(component, set())
 
                 for svc in resp.get("services", []):
+                    if svc.get("serviceArn", svc_arn) != svc_arn:
+                        self._record_issue("ecs_service_identity", svc_arn,
+                                           "DescribeServices returned a different service ARN")
+                        continue
                     td_arn = svc.get("taskDefinition", "")
                     if not td_arn:
                         continue
@@ -997,7 +1187,7 @@ class CfnLiveDiscoverer:
                                 and not env_value.startswith("arn:")
                             ):
                                 norm_name = component_known[env_value]
-                                self._register_ecs_storage_access(component, norm_name, None)
+                                self._register_ecs_storage_access(svc_arn, norm_name, None)
                                 logger.debug(
                                     "[cfn-live] ECS storage (env value match): %s -> %s (from %s=%s)",
                                     component,
@@ -1007,8 +1197,8 @@ class CfnLiveDiscoverer:
                                 )
 
                     if http_clients:
-                        self.ecs_http_clients.setdefault(component, [])
-                        self.ecs_http_clients[component].extend(http_clients)
+                        self.ecs_http_clients.setdefault(svc_arn, [])
+                        self.ecs_http_clients[svc_arn].extend(http_clients)
 
                     # 2. Task role IAM policies -> SQS and storage edges
                     task_role_arn = td.get("taskRoleArn", "")
@@ -1024,8 +1214,7 @@ class CfnLiveDiscoverer:
 
                     # Attached managed policies
                     try:
-                        attached = self.iam.list_attached_role_policies(RoleName=role_name)
-                        for pol in attached.get("AttachedPolicies", []):
+                        for pol in _paged_items(self.iam, "list_attached_role_policies", "AttachedPolicies", RoleName=role_name):
                             pol_arn = pol["PolicyArn"]
                             pol_detail = self.iam.get_policy(PolicyArn=pol_arn)
                             version_id = pol_detail["Policy"]["DefaultVersionId"]
@@ -1038,12 +1227,11 @@ class CfnLiveDiscoverer:
                                 doc = _json.loads(doc)
                             policy_docs.append(doc)
                     except Exception as e:
-                        logger.debug("[cfn-live] Cannot list attached policies for %s: %s", role_name, e)
+                        self._record_issue("ecs_attached_role_policies", role_name, e)
 
                     # Inline role policies
                     try:
-                        inline_names = self.iam.list_role_policies(RoleName=role_name)
-                        for pol_name in inline_names.get("PolicyNames", []):
+                        for pol_name in _paged_items(self.iam, "list_role_policies", "PolicyNames", RoleName=role_name):
                             pol_inline = self.iam.get_role_policy(
                                 RoleName=role_name,
                                 PolicyName=pol_name,
@@ -1053,10 +1241,12 @@ class CfnLiveDiscoverer:
                                 doc = _json.loads(doc)
                             policy_docs.append(doc)
                     except Exception as e:
-                        logger.debug("[cfn-live] Cannot list inline policies for %s: %s", role_name, e)
+                        self._record_issue("ecs_inline_role_policies", role_name, e)
 
                     for doc in policy_docs:
-                        for stmt in doc.get("Statement", []):
+                        from pndocgen.sources.aws.event_permissions import collect
+                        collect(self, doc, svc_arn, 'ecs')
+                        for stmt in _statements(doc):
                             effect = stmt.get("Effect", "Allow")
                             if effect != "Allow":
                                 continue
@@ -1066,8 +1256,8 @@ class CfnLiveDiscoverer:
                                 actions = [actions]
                             actions_lower = {a.lower() for a in actions if isinstance(a, str)}
 
-                            is_consumer = bool(actions_lower & _SQS_CONSUMER_ACTIONS)
-                            is_producer = bool(actions_lower & _SQS_PRODUCER_ACTIONS)
+                            is_consumer = any(fnmatch.fnmatchcase("sqs:receivemessage", a) for a in actions_lower)
+                            is_producer = any(fnmatch.fnmatchcase("sqs:sendmessage", a) for a in actions_lower)
 
                             dynamo_modes = _classify_storage_modes(
                                 actions_lower=actions_lower,
@@ -1097,7 +1287,7 @@ class CfnLiveDiscoverer:
                                 if res_arn == "*":
                                     if dynamo_modes:
                                         for table_name in owned_tables:
-                                            self._register_ecs_storage_access(component, table_name, dynamo_modes)
+                                            self._register_ecs_storage_access(svc_arn, table_name, dynamo_modes)
                                             logger.debug(
                                                 "[cfn-live] ECS DynamoDB (wildcard IAM): %s -> %s [%s]",
                                                 component,
@@ -1106,7 +1296,7 @@ class CfnLiveDiscoverer:
                                             )
                                     if s3_modes:
                                         for bucket_name in owned_buckets:
-                                            self._register_ecs_storage_access(component, bucket_name, s3_modes)
+                                            self._register_ecs_storage_access(svc_arn, bucket_name, s3_modes)
                                             logger.debug(
                                                 "[cfn-live] ECS S3 (wildcard IAM): %s -> %s [%s]",
                                                 component,
@@ -1116,17 +1306,17 @@ class CfnLiveDiscoverer:
                                     continue
 
                                 if ":sqs:" in res_arn:
+                                    from pndocgen.sources.aws.resource_identity import sqs_identity
+                                    if not sqs_identity(res_arn):
+                                        self._record_issue('unresolved_sqs_identity', res_arn, 'Non-concrete queue scope')
+                                        continue
                                     queue_name = res_arn.split(":")[-1]
-                                    if not queue_name or queue_name == "*":
+                                    if not queue_name or "*" in queue_name or "?" in queue_name:
                                         continue
                                     if is_consumer:
-                                        self.ecs_sqs_consumers.setdefault(component, [])
-                                        self.ecs_sqs_consumers[component].append(queue_name)
-                                        logger.debug("[cfn-live] ECS SQS consumer: %s <- %s", component, queue_name)
+                                        self.ecs_sqs_consumers.setdefault(svc_arn, []).append(res_arn)
                                     if is_producer:
-                                        self.ecs_sqs_producers.setdefault(component, [])
-                                        self.ecs_sqs_producers[component].append(queue_name)
-                                        logger.debug("[cfn-live] ECS SQS producer: %s -> %s", component, queue_name)
+                                        self.ecs_sqs_producers.setdefault(svc_arn, []).append(res_arn)
                                     continue
 
                                 if ":dynamodb:" in res_arn and dynamo_modes:
@@ -1137,7 +1327,7 @@ class CfnLiveDiscoverer:
                                     if not norm_name or norm_name not in owned_tables:
                                         # Keep scope to tables created by the same microservice storage stack.
                                         continue
-                                    self._register_ecs_storage_access(component, norm_name, dynamo_modes)
+                                    self._register_ecs_storage_access(svc_arn, norm_name, dynamo_modes)
                                     logger.debug(
                                         "[cfn-live] ECS DynamoDB access: %s -> %s [%s]",
                                         component,
@@ -1153,7 +1343,7 @@ class CfnLiveDiscoverer:
                                     norm_name = component_known.get(bucket_name)
                                     if not norm_name or norm_name not in owned_buckets:
                                         continue
-                                    self._register_ecs_storage_access(component, norm_name, s3_modes)
+                                    self._register_ecs_storage_access(svc_arn, norm_name, s3_modes)
                                     logger.debug(
                                         "[cfn-live] ECS S3 access: %s -> %s [%s]",
                                         component,
@@ -1162,7 +1352,7 @@ class CfnLiveDiscoverer:
                                     )
 
             except Exception as e:
-                logger.debug("[cfn-live] Cannot enrich ECS %s: %s", svc_arn, e)
+                self._record_issue("ecs_task_definition", svc_arn, e)
 
     def _enrich_lambda_iam(self) -> None:
         """
@@ -1258,8 +1448,7 @@ class CfnLiveDiscoverer:
                 # Collect all policy docs (attached + inline)
                 policy_docs: list[dict] = []
                 try:
-                    attached = self.iam.list_attached_role_policies(RoleName=role_name)
-                    for pol in attached.get("AttachedPolicies", []):
+                    for pol in _paged_items(self.iam, "list_attached_role_policies", "AttachedPolicies", RoleName=role_name):
                         pol_arn = pol["PolicyArn"]
                         # Skip AWS managed policies (they are too broad / not component-specific)
                         if pol_arn.startswith("arn:aws:iam::aws:policy/"):
@@ -1274,11 +1463,10 @@ class CfnLiveDiscoverer:
                             doc = _json.loads(doc)
                         policy_docs.append(doc)
                 except Exception as e:
-                    logger.debug("[cfn-live] Lambda IAM attached policies for %s: %s", fn_name, e)
+                    self._record_issue("lambda_attached_role_policies", fn_name, e)
 
                 try:
-                    inline_names = self.iam.list_role_policies(RoleName=role_name)
-                    for pol_name in inline_names.get("PolicyNames", []):
+                    for pol_name in _paged_items(self.iam, "list_role_policies", "PolicyNames", RoleName=role_name):
                         pol_inline = self.iam.get_role_policy(
                             RoleName=role_name, PolicyName=pol_name
                         )
@@ -1287,7 +1475,7 @@ class CfnLiveDiscoverer:
                             doc = _json.loads(doc)
                         policy_docs.append(doc)
                 except Exception as e:
-                    logger.debug("[cfn-live] Lambda IAM inline policies for %s: %s", fn_name, e)
+                    self._record_issue("lambda_inline_role_policies", fn_name, e)
 
                 # Normalize lambda name for edge source
                 lambda_norm = _normalize_name(fn_name, "AWS::Lambda::Function", fn_name)
@@ -1296,8 +1484,10 @@ class CfnLiveDiscoverer:
                 owned_buckets = component_buckets_by_name.get(component, set())
 
                 for doc in policy_docs:
-                    for stmt in doc.get("Statement", []):
-                        if stmt.get("Effect", "Allow") != "Allow":
+                    from pndocgen.sources.aws.event_permissions import collect
+                    collect(self, doc, lambda_norm, 'lambda')
+                    for stmt in _statements(doc):
+                        if stmt.get("Effect") != "Allow":
                             continue
                         actions = stmt.get("Action", [])
                         if isinstance(actions, str):
@@ -1316,7 +1506,9 @@ class CfnLiveDiscoverer:
                             read_actions=_S3_READ_ACTIONS,
                             write_actions=_S3_WRITE_ACTIONS,
                         )
-                        if not (dynamo_modes or s3_modes):
+                        sqs_send = any(fnmatch.fnmatchcase("sqs:sendmessage", a) for a in actions_lower)
+                        sqs_receive = any(fnmatch.fnmatchcase("sqs:receivemessage", a) for a in actions_lower)
+                        if not (dynamo_modes or s3_modes or sqs_send or sqs_receive):
                             continue
 
                         resources = stmt.get("Resource", [])
@@ -1328,10 +1520,27 @@ class CfnLiveDiscoverer:
                                 continue
 
                             if res_arn == "*":
-                                for table_name in owned_tables:
-                                    self._register_lambda_storage_access(lambda_norm, table_name, dynamo_modes)
-                                for bucket_name in owned_buckets:
-                                    self._register_lambda_storage_access(lambda_norm, bucket_name, s3_modes)
+                                if dynamo_modes:
+                                    for table_name in owned_tables:
+                                        self._register_lambda_storage_access(lambda_norm, table_name, dynamo_modes)
+                                if s3_modes:
+                                    for bucket_name in owned_buckets:
+                                        self._register_lambda_storage_access(lambda_norm, bucket_name, s3_modes)
+                                # No concrete SQS endpoint can be inferred from Resource:*.
+                                continue
+
+                            if ":sqs:" in res_arn and (sqs_send or sqs_receive):
+                                from pndocgen.sources.aws.resource_identity import sqs_identity
+                                if not sqs_identity(res_arn):
+                                    self._record_issue('unresolved_sqs_identity', res_arn, 'Non-concrete queue scope')
+                                    continue
+                                queue = res_arn.split(":")[-1]
+                                if not queue or "*" in queue or "?" in queue:
+                                    continue
+                                if sqs_send:
+                                    self.lambda_sqs_producers.setdefault(lambda_norm, []).append(res_arn)
+                                if sqs_receive:
+                                    self.lambda_sqs_consumers.setdefault(lambda_norm, []).append(res_arn)
                                 continue
 
                             if ":dynamodb:" in res_arn and dynamo_modes:
@@ -1367,7 +1576,7 @@ class CfnLiveDiscoverer:
                                 continue
 
             except Exception as e:
-                logger.debug("[cfn-live] Cannot enrich Lambda IAM for %s: %s", fn_name, e)
+                self._record_issue("lambda_iam", fn_name, e)
 
         total = sum(len(v) for v in self.lambda_storage_access.values())
         logger.info(
@@ -1385,12 +1594,8 @@ class CfnLiveDiscoverer:
         ``"Condition": {"ArnLike": {"AWS:SourceArn": "arn:aws:execute-api:..."}}``
         to the Lambda's resource policy.
 
-        This is zero-cost (read-only, no extra APIs beyond lambda:GetPolicy)
-        and catches ALL API GW → Lambda integrations regardless of how they
-        were configured (OpenAPI, console, CFN, etc.).
-
-        Also inspects CFN captured resources: any AWS::Lambda::Permission
-        with a SourceArn pointing to an API Gateway REST API.
+        This identifies an invocation permission, not proof of an active API
+        integration or runtime traffic. Only known REST APIs are resolved.
         """
         import json as _json
         import re
@@ -1411,11 +1616,9 @@ class CfnLiveDiscoverer:
 
         # Step 2: For each Lambda in our resource_map, call get_policy()
         # to find API GW source ARN references
-        lambda_entries: list[tuple[str, str]] = [
-            (pid, comp)
-            for pid, comp in self.resource_map.items()
-            if ":function:" in pid  # Lambda function ARN
-        ]
+        lambda_entries = [(r["physical_id"], comp)
+                          for comp, resources in self.component_resources.items()
+                          for r in resources if r.get("type") == "AWS::Lambda::Function" and r.get("physical_id")]
 
         _APIGW_ARN_RE = re.compile(
             r"arn:aws:execute-api:[^:]+:[^:]+:([a-z0-9]+)/",
@@ -1426,13 +1629,26 @@ class CfnLiveDiscoverer:
         seen_edges: set[tuple[str, str]] = set()
 
         for fn_arn, component in lambda_entries:
-            fn_name = fn_arn.split(":")[-1]
+            fn_name = _lambda_name(fn_arn)
             try:
                 policy_resp = self.lmb.get_policy(FunctionName=fn_name)
                 policy_str = policy_resp.get("Policy", "{}")
                 policy = _json.loads(policy_str)
 
-                for stmt in policy.get("Statement", []):
+                for stmt in _statements(policy):
+                    if stmt.get("Effect") != "Allow":
+                        continue
+                    principal = stmt.get("Principal", {})
+                    services = principal.get("Service", []) if isinstance(principal, dict) else principal
+                    if isinstance(services, str):
+                        services = [services]
+                    actions = stmt.get("Action", [])
+                    if isinstance(actions, str):
+                        actions = [actions]
+                    if "apigateway.amazonaws.com" not in services or not any(
+                        a.lower() in {"lambda:invokefunction", "lambda:*", "*"} for a in actions
+                    ):
+                        continue
                     condition = stmt.get("Condition", {})
                     # API Gateway adds: Condition.ArnLike["AWS:SourceArn"] = "arn:aws:execute-api:..."
                     source_arns = []
@@ -1457,7 +1673,7 @@ class CfnLiveDiscoverer:
                             if edge_key not in seen_edges:
                                 seen_edges.add(edge_key)
                                 self.apigw_lambda_edges.append({
-                                    "apigw_name": apigw_logical,
+                                    "apigw_name": self.apigw_real_names.get(api_id, apigw_logical),
                                     "apigw_id": api_id,
                                     "lambda_name": lambda_norm,
                                     "component": component,
@@ -1467,7 +1683,7 @@ class CfnLiveDiscoverer:
                 # Lambda has no resource policy → no API GW integration
                 continue
             except Exception as e:
-                logger.debug("[cfn-live] Cannot read policy for %s: %s", fn_name, e)
+                self._record_issue("lambda_resource_policy", fn_name, e)
 
         logger.info(
             "[cfn-live] API GW enrichment complete: %d API GW -> Lambda edges",
@@ -1493,16 +1709,6 @@ class CfnLiveDiscoverer:
         Edge format: rule_name → target_name
         """
         import json as _json
-
-        def _build_rule_display_name(physical_id: str, logical_id: str) -> str:
-            """Build a rule name that matches the inventory node naming style."""
-            name = _normalize_name(physical_id, "AWS::Events::Rule", logical_id)
-            env_tokens = ("-dev-", "-prod-", "-staging-", "-uat-")
-            if logical_id and ("|" in physical_id or any(tok in name for tok in env_tokens)):
-                kebab = _re.sub(r"(?<!^)(?=[A-Z])", "-", logical_id).lower()
-                if kebab and len(kebab) > 3:
-                    return kebab
-            return name
 
         def _parse_rule_id(physical_id: str) -> tuple[Optional[str], str]:
             """Parse CFN rule physical id into (event_bus_name, rule_name)."""
@@ -1564,7 +1770,9 @@ class CfnLiveDiscoverer:
                         continue
 
                     event_bus_name, rule_api_name = _parse_rule_id(physical_id)
-                    rule_display_name = _build_rule_display_name(physical_id, logical_id)
+                    # Keep the CFN identity until the inventory registry projects
+                    # it onto a name. Display normalization must not perform joins.
+                    rule_display_name = physical_id
 
                     rule_entries.append({
                         "physical_id": physical_id,
@@ -1582,22 +1790,10 @@ class CfnLiveDiscoverer:
             logger.debug("[cfn-live] No EventBridge rules found, skipping EB enrichment")
             return
 
-        # Build ECS component lookup: cluster+service → component_name
-        ecs_components: dict[str, str] = {}
-        for component, resources in self.component_resources.items():
-            for res in resources:
-                if res.get("type") == "AWS::ECS::Service":
-                    ecs_components[component] = component
-                    pid = res.get("physical_id", "")
-                    if pid:
-                        ecs_components[pid] = component
-
-        # Also use resource_map which has ECS service ARNs
-        for arn, comp in self.resource_map.items():
-            if ":service/" in arn:
-                ecs_components[arn] = comp
-                svc_name = arn.split("/")[-1]
-                ecs_components[svc_name] = comp
+        # Never infer a service from a substring of a cluster/component name.
+        # ECS RunTask targets describe tasks, not an ECS Service owner.
+        ecs_services = {pid for component in self.component_resources
+                        for pid in self._ecs_identities(component)}
 
         seen: set[tuple[str, str]] = set()
         for entry in rule_entries:
@@ -1605,46 +1801,43 @@ class CfnLiveDiscoverer:
             event_bus_name = entry["event_bus_name"]
             rule_display_name = entry["rule_display_name"]
             rule_component = entry["component"]
+            from pndocgen.sources.aws.event_context import enrich_rule
+            enrich_rule(self, entry)
 
             try:
                 params = {"Rule": rule_api_name}
                 if event_bus_name:
                     params["EventBusName"] = event_bus_name
 
-                resp = self.events.list_targets_by_rule(**params)
-
-                for target in resp.get("Targets", []):
+                targets = list(_paged_items(self.events, "list_targets_by_rule", "Targets", **params))
+                self.dataflow_descriptions.setdefault('eventbridge:' + entry['physical_id'], {})['Targets'] = targets
+                for target in targets:
                     target_arn = target.get("Arn", "")
 
                     if ":ecs:" in target_arn:
-                        # EventBridge → ECS
-                        for ecs_key, ecs_comp in ecs_components.items():
-                            if ecs_key in target_arn or target_arn.endswith(ecs_key):
-                                edge_key = (rule_display_name, ecs_comp)
-                                if edge_key not in seen:
-                                    seen.add(edge_key)
-                                    self.eventbridge_ecs_edges.append({
-                                        "rule_name": rule_display_name,
-                                        "ecs_component": ecs_comp,
-                                        "component": rule_component,
-                                    })
-                                    logger.debug(
-                                        "[cfn-live] EventBridge->ECS: %s -> %s",
-                                        rule_display_name,
-                                        ecs_comp,
-                                    )
-                                break
+                        if target_arn in ecs_services and not target.get("EcsParameters"):
+                            edge_key = (rule_display_name, target_arn)
+                            if edge_key not in seen:
+                                seen.add(edge_key)
+                                self.eventbridge_ecs_edges.append({
+                                    "rule_name": rule_display_name,
+                                    "ecs_component": target_arn,
+                                    "component": rule_component,
+                                })
+                        else:
+                            self._record_issue('unresolved_eventbridge_ecs_target', entry['physical_id'], target_arn)
 
                     elif ":lambda:" in target_arn or ":function:" in target_arn:
                         # EventBridge → Lambda
-                        fn_name = target_arn.split(":")[-1]
+                        fn_name = _lambda_name(target_arn)
                         norm_fn = _normalize_name(fn_name, "AWS::Lambda::Function", "")
-                        edge_key = (rule_display_name, norm_fn)
+                        edge_key = (rule_display_name, target_arn)
                         if edge_key not in seen:
                             seen.add(edge_key)
                             self.eventbridge_lambda_edges.append({
                                 "rule_name": rule_display_name,
                                 "lambda_name": norm_fn,
+                                "target_arn": target_arn,
                                 "component": rule_component,
                             })
                             logger.debug(
@@ -1656,12 +1849,13 @@ class CfnLiveDiscoverer:
                     elif ":sqs:" in target_arn:
                         # EventBridge → SQS
                         queue_name = target_arn.split(":")[-1]
-                        edge_key = (rule_display_name, queue_name)
+                        edge_key = (rule_display_name, target_arn)
                         if edge_key not in seen:
                             seen.add(edge_key)
                             self.eventbridge_sqs_edges.append({
                                 "rule_name": rule_display_name,
                                 "queue_name": queue_name,
+                                'queue_arn': target_arn,
                                 "component": rule_component,
                             })
                             logger.debug(
@@ -1670,13 +1864,18 @@ class CfnLiveDiscoverer:
                                 queue_name,
                             )
 
+                    else:
+                        from pndocgen.sources.aws.dataflows import arn_type, add_link
+                        target_type = arn_type(target_arn)
+                        if target_type:
+                            add_link(self, 'AWS::Events::Rule', entry['physical_id'],
+                                     target_type, target_arn, 'eventbridge_trigger',
+                                     'triggers', 'eventbridge_target_configuration')
+                        else:
+                            self._record_issue('unsupported_eventbridge_target', entry['physical_id'], target_arn)
+
             except Exception as e:
-                logger.debug(
-                    "[cfn-live] Cannot list targets for rule %s (bus=%s): %s",
-                    rule_api_name,
-                    event_bus_name or "default",
-                    e,
-                )
+                self._record_issue("list_targets_by_rule", entry["physical_id"], e)
 
         # Fallback: infer EventBridge Rule -> SQS from queue policies.
         queue_entries: list[tuple[str, str]] = [
@@ -1721,13 +1920,15 @@ class CfnLiveDiscoverer:
                             continue
 
                         rule_key = (source_bus or "", source_rule)
-                        source_rule_name = rule_name_by_key.get(rule_key)
+                        parts = source_arn.split(':', 5)
+                        in_scope = len(parts) == 6 and (parts[1], parts[3], parts[4]) in self.dataflow_scopes
+                        source_rule_name = rule_name_by_key.get(rule_key) if in_scope else None
                         source_rule_component = rule_component_by_key.get(rule_key, queue_component)
                         if not source_rule_name:
                             # Default fallback when rule is outside discovered stack scope.
-                            source_rule_name = _normalize_name(source_rule, "AWS::Events::Rule", "")
+                            source_rule_name = source_arn
 
-                        edge_key = (source_rule_name, queue_name)
+                        edge_key = (source_rule_name, queue_arn)
                         if edge_key in seen:
                             continue
 
@@ -1735,7 +1936,9 @@ class CfnLiveDiscoverer:
                         self.eventbridge_sqs_edges.append({
                             "rule_name": source_rule_name,
                             "queue_name": queue_name,
+                            'queue_arn': queue_arn,
                             "component": source_rule_component,
+                            "evidence": "sqs_resource_policy_permission",
                         })
                         logger.debug(
                             "[cfn-live] EventBridge->SQS (policy): %s -> %s",
@@ -1744,7 +1947,7 @@ class CfnLiveDiscoverer:
                         )
 
             except Exception as e:
-                logger.debug("[cfn-live] Cannot inspect queue policy for %s: %s", queue_url, e)
+                self._record_issue("sqs_resource_policy", queue_url, e)
 
         logger.info(
             "[cfn-live] EventBridge enrichment complete: %d EB->ECS, %d EB->Lambda, %d EB->SQS edges",
@@ -1793,8 +1996,14 @@ class CfnLiveDiscoverer:
             if not apigw_entries or not has_ecs:
                 continue
 
-            # Proven chain: API GW + TargetGroup + ECS in same component
-            # (or fallback: API GW + ECS when TargetGroup is excluded from inventory)
+            if len(self._ecs_identities(component)) > 1:
+                for apigw_name in sorted(set(apigw_entries)):
+                    self._record_issue("ambiguous_apigw_ecs_owner", apigw_name,
+                                       f"Multiple ECS services in {component}; no verified integration binding")
+                continue
+
+            # Co-location heuristic, not a proven integration chain. Preserve its
+            # explicit evidence classification when serializing relationships.
             if has_target_group or has_ecs:
                 proof = "TargetGroup verified" if has_target_group else "same-component fallback"
                 for apigw_name in apigw_entries:
@@ -1841,13 +2050,12 @@ class CfnLiveDiscoverer:
         for topic_arn, component in sns_entries:
             try:
                 norm_topic = _normalize_name(topic_arn, "AWS::SNS::Topic", "")
-                paginator_resp = self.sns.list_subscriptions_by_topic(TopicArn=topic_arn)
-                subscriptions = paginator_resp.get("Subscriptions", [])
-
-                for sub in subscriptions:
+                for sub in _paged_items(self.sns, "list_subscriptions_by_topic", "Subscriptions", TopicArn=topic_arn):
                     protocol = sub.get("Protocol", "")
                     endpoint = sub.get("Endpoint", "")
                     if not endpoint or endpoint == "PendingConfirmation":
+                        continue
+                    if sub.get("SubscriptionArn") in {"PendingConfirmation", "Deleted"}:
                         continue
 
                     if protocol == "sqs" and ":sqs:" in endpoint:
@@ -1855,6 +2063,7 @@ class CfnLiveDiscoverer:
                         self.sns_edges.append({
                             "source_topic": norm_topic,
                             "target": queue_name,
+                            'target_arn': endpoint,
                             "target_type": "sqs",
                             "component": component,
                         })
@@ -1864,11 +2073,12 @@ class CfnLiveDiscoverer:
                             queue_name,
                         )
                     elif protocol == "lambda" and ":function:" in endpoint:
-                        fn_name = endpoint.split(":")[-1]
+                        fn_name = _lambda_name(endpoint)
                         norm_fn = _normalize_name(fn_name, "AWS::Lambda::Function", "")
                         self.sns_edges.append({
                             "source_topic": norm_topic,
                             "target": norm_fn,
+                            "target_arn": endpoint,
                             "target_type": "lambda",
                             "component": component,
                         })
@@ -1879,7 +2089,7 @@ class CfnLiveDiscoverer:
                         )
 
             except Exception as e:
-                logger.debug("[cfn-live] Cannot list SNS subscriptions for %s: %s", topic_arn, e)
+                self._record_issue("list_subscriptions_by_topic", topic_arn, e)
 
         logger.info(
             "[cfn-live] SNS enrichment complete: %d SNS fan-out edges",
